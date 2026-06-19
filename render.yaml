@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: wandatools-api
+    runtime: python
+    runtimeVersion: 3.12.2
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        scope: run
+      - key: SECRET_KEY
+        scope: run
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: "false"
