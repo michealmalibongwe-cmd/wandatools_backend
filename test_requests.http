@@ -1,0 +1,358 @@
+###
+# WandaTools API Testing
+# Install VS Code Extension: "REST Client" to run these requests
+# Edit @baseUrl and @token variables below
+
+@baseUrl = http://localhost:8000/api/v1
+@token = your_access_token_here
+
+### ═══════════════════════════════════════════════════════════
+### HEALTH CHECK
+### ═══════════════════════════════════════════════════════════
+
+### Check API health
+GET http://localhost:8000/health
+
+### Get API info
+GET http://localhost:8000/api/v1
+
+### ═══════════════════════════════════════════════════════════
+### AUTHENTICATION
+### ═══════════════════════════════════════════════════════════
+
+### Register new user
+POST @baseUrl/auth/register
+Content-Type: application/json
+
+{
+  "name": "John Doe",
+  "email": "john@example.com",
+  "password": "TestPassword123!",
+  "business_type": "Freelancer",
+  "timezone": "Africa/Johannesburg"
+}
+
+### Login user
+POST @baseUrl/auth/login
+Content-Type: application/json
+
+{
+  "email": "john@example.com",
+  "password": "TestPassword123!"
+}
+
+### Get current user info (requires token)
+GET @baseUrl/auth/me
+Authorization: Bearer @token
+
+### Update user profile
+PUT @baseUrl/auth/profile
+Authorization: Bearer @token
+Content-Type: application/json
+
+{
+  "name": "John Doe Updated",
+  "phone": "+27764693531",
+  "timezone": "Africa/Johannesburg",
+  "business_type": "Small Business"
+}
+
+### Change password
+POST @baseUrl/auth/change-password
+Authorization: Bearer @token
+Content-Type: application/json
+
+{
+  "current_password": "TestPassword123!",
+  "new_password": "NewPassword456!"
+}
+
+### Refresh access token
+POST @baseUrl/auth/refresh
+Content-Type: application/json
+
+{
+  "refresh_token": "your_refresh_token_here"
+}
+
+### Logout user
+POST @baseUrl/auth/logout
+Authorization: Bearer @token
+
+### ═══════════════════════════════════════════════════════════
+### TRANSACTIONS
+### ═══════════════════════════════════════════════════════════
+
+### Create income transaction
+POST @baseUrl/tools/transactions
+Authorization: Bearer @token
+Content-Type: application/json
+
+{
+  "type": "income",
+  "amount": 5000.00,
+  "category": "Sales",
+  "description": "Client Invoice #001",
+  "transaction_date": "2025-06-18T10:30:00",
+  "reference_id": "INV-001",
+  "recipient_or_payer": "ABC Company",
+  "notes": "Payment received for web design services",
+  "is_recurring": "monthly",
+  "tax_deductible": "Yes"
+}
+
+### Create expense transaction
+POST @baseUrl/tools/transactions
+Authorization: Bearer @token
+Content-Type: application/json
+
+{
+  "type": "expense",
+  "amount": 1200.00,
+  "category": "Rent",
+  "description": "Monthly office rent",
+  "transaction_date": "2025-06-01T09:00:00",
+  "reference_id": "RENT-06-2025",
+  "recipient_or_payer": "Property Management Ltd",
+  "notes": "June rent payment",
+  "is_recurring": "monthly",
+  "tax_deductible": "No"
+}
+
+### List all transactions
+GET @baseUrl/tools/transactions?skip=0&limit=10
+Authorization: Bearer @token
+
+### List transactions with filters
+GET @baseUrl/tools/transactions?skip=0&limit=10&transaction_type=income&category=Sales
+Authorization: Bearer @token
+
+### Get specific transaction
+GET @baseUrl/tools/transactions/1
+Authorization: Bearer @token
+
+### Update transaction
+PUT @baseUrl/tools/transactions/1
+Authorization: Bearer @token
+Content-Type: application/json
+
+{
+  "amount": 5500.00,
+  "description": "Client Invoice #001 - Updated",
+  "notes": "Revised amount after approval"
+}
+
+### Delete transaction
+DELETE @baseUrl/tools/transactions/1
+Authorization: Bearer @token
+
+### ═══════════════════════════════════════════════════════════
+### DASHBOARD
+### ═══════════════════════════════════════════════════════════
+
+### Get current month summary
+GET @baseUrl/tools/dashboard/summary
+Authorization: Bearer @token
+
+### Get specific month summary (format: YYYY-MM)
+GET @baseUrl/tools/dashboard/summary?month=2025-06
+Authorization: Bearer @token
+
+### Get 6-month history
+GET @baseUrl/tools/dashboard/history?months=6
+Authorization: Bearer @token
+
+### Get 12-month history
+GET @baseUrl/tools/dashboard/history?months=12
+Authorization: Bearer @token
+
+### ═══════════════════════════════════════════════════════════
+### DOCUMENTS
+### ═══════════════════════════════════════════════════════════
+
+### Generate audit report
+POST @baseUrl/tools/documents
+Authorization: Bearer @token
+Content-Type: application/json
+
+{
+  "type": "audit_report",
+  "period_start": "2025-01-01T00:00:00",
+  "period_end": "2025-06-30T23:59:59"
+}
+
+### Generate loan application document
+POST @baseUrl/tools/documents
+Authorization: Bearer @token
+Content-Type: application/json
+
+{
+  "type": "loan_application",
+  "period_start": "2025-01-01T00:00:00",
+  "period_end": "2025-06-30T23:59:59"
+}
+
+### Generate investment report
+POST @baseUrl/tools/documents
+Authorization: Bearer @token
+Content-Type: application/json
+
+{
+  "type": "investment_report",
+  "period_start": "2025-01-01T00:00:00",
+  "period_end": "2025-06-30T23:59:59"
+}
+
+### Generate monthly summary
+POST @baseUrl/tools/documents
+Authorization: Bearer @token
+Content-Type: application/json
+
+{
+  "type": "monthly_summary",
+  "period_start": "2025-06-01T00:00:00",
+  "period_end": "2025-06-30T23:59:59"
+}
+
+### List all documents
+GET @baseUrl/tools/documents
+Authorization: Bearer @token
+
+### Get specific document
+GET @baseUrl/tools/documents/1
+Authorization: Bearer @token
+
+### Delete document
+DELETE @baseUrl/tools/documents/1
+Authorization: Bearer @token
+
+### ═══════════════════════════════════════════════════════════
+### WANDAAI
+### ═══════════════════════════════════════════════════════════
+
+### Ask WandaAI - Cash flow insights
+POST @baseUrl/wandaai/query
+Authorization: Bearer @token
+Content-Type: application/json
+
+{
+  "question": "How is my cash flow looking this month?",
+  "mode": "insights"
+}
+
+### Ask WandaAI - Spending analysis
+POST @baseUrl/wandaai/query
+Authorization: Bearer @token
+Content-Type: application/json
+
+{
+  "question": "Where am I spending the most money?",
+  "mode": "insights"
+}
+
+### Ask WandaAI - Profit margin
+POST @baseUrl/wandaai/query
+Authorization: Bearer @token
+Content-Type: application/json
+
+{
+  "question": "What is my profit margin this month?",
+  "mode": "insights"
+}
+
+### Ask WandaAI - Cost reduction recommendations
+POST @baseUrl/wandaai/query
+Authorization: Bearer @token
+Content-Type: application/json
+
+{
+  "question": "How can I reduce my expenses?",
+  "mode": "recommendations"
+}
+
+### Ask WandaAI - Loan readiness assessment
+POST @baseUrl/wandaai/query
+Authorization: Bearer @token
+Content-Type: application/json
+
+{
+  "question": "Am I ready to apply for a business loan?",
+  "mode": "insights"
+}
+
+### Ask WandaAI - Business strategy
+POST @baseUrl/wandaai/query
+Authorization: Bearer @token
+Content-Type: application/json
+
+{
+  "question": "What financial goals should I set?",
+  "mode": "business"
+}
+
+### Get AI modes
+GET @baseUrl/wandaai/modes
+Authorization: Bearer @token
+
+### Get sample prompts
+GET @baseUrl/wandaai/prompts
+Authorization: Bearer @token
+
+### ═══════════════════════════════════════════════════════════
+### SUPPORT & CONTACT
+### ═══════════════════════════════════════════════════════════
+
+### Submit contact form (no auth required)
+POST @baseUrl/support/contact
+Content-Type: application/json
+
+{
+  "name": "John Smith",
+  "email": "john.smith@example.com",
+  "phone": "+27764693531",
+  "subject": "Technical support needed",
+  "message": "I'm having trouble connecting my accounting software to WandaTools. Can someone help me troubleshoot?"
+}
+
+### Get FAQ items
+GET @baseUrl/support/faq
+
+### Search FAQ
+GET @baseUrl/support/faq?search=security
+
+### Filter FAQ by category
+GET @baseUrl/support/faq?category=billing
+
+### Get support status
+GET @baseUrl/support/status
+
+### Get system health (for authenticated users)
+GET @baseUrl/support/health
+Authorization: Bearer @token
+
+### ═══════════════════════════════════════════════════════════
+### NOTIFICATIONS (Future)
+### ═══════════════════════════════════════════════════════════
+
+### Get notifications
+### GET @baseUrl/notifications
+### Authorization: Bearer @token
+
+### Mark notification as read
+### PUT @baseUrl/notifications/1/read
+### Authorization: Bearer @token
+
+### Delete notification
+### DELETE @baseUrl/notifications/1
+### Authorization: Bearer @token
+
+### ═══════════════════════════════════════════════════════════
+### NOTES
+### ═══════════════════════════════════════════════════════════
+
+# 1. Update @token variable with your actual access token from login response
+# 2. Update @baseUrl for production: https://wandatools-api.onrender.com/api/v1
+# 3. All dates should be in ISO 8601 format: YYYY-MM-DDTHH:MM:SS
+# 4. Currency is in ZAR (South African Rand)
+# 5. Authentication required for all endpoints except /health, /login, /register, /support/contact, /support/faq
+# 6. Use Ctrl+Alt+R (Windows/Linux) or Cmd+Alt+R (Mac) to run requests
