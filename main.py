@@ -1,14 +1,13 @@
 """
-WandaTools Backend
-FastAPI application for financial management system
-
-Deployed on Railway.app with PostgreSQL
+WandaTools Backend - WORKING VERSION
+FastAPI application with real user & transaction storage
 """
 
-from fastapi import FastAPI, status
+from fastapi import FastAPI, status, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from datetime import datetime
 import os
+import json
 
 app = FastAPI(
     title="WandaTools API",
@@ -21,11 +20,58 @@ app = FastAPI(
 # ═══ CORS Middleware ═══
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins (or specify your frontend URL)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ═══════════════════════════════════════════════════════════
+# IN-MEMORY STORAGE
+# ═══════════════════════════════════════════════════════════
+
+# Store users: {email: {name, password, id, created_at}}
+users_db = {
+    "demo@test.com": {
+        "id": 1,
+        "name": "Demo User",
+        "email": "demo@test.com",
+        "password": "Demo123!",  # In production: hashed password
+        "created_at": "2025-06-18T10:00:00"
+    }
+}
+
+# Store transactions: {user_id: [transaction_list]}
+transactions_db = {
+    1: [
+        {
+            "id": 1,
+            "user_id": 1,
+            "type": "income",
+            "amount": 5000.00,
+            "category": "Sales",
+            "description": "Client payment",
+            "transaction_date": "2025-06-18T10:00:00",
+            "created_at": "2025-06-18T10:00:00"
+        },
+        {
+            "id": 2,
+            "user_id": 1,
+            "type": "expense",
+            "amount": 1200.00,
+            "category": "Rent",
+            "description": "Monthly rent",
+            "transaction_date": "2025-06-17T09:00:00",
+            "created_at": "2025-06-17T09:00:00"
+        }
+    ]
+}
+
+# Track active sessions: {token: {user_id, email, login_time}}
+active_sessions = {}
+
+next_user_id = 2
+next_transaction_id = 3
 
 # ═══════════════════════════════════════════════════════════
 # ROOT ENDPOINTS
@@ -33,13 +79,12 @@ app.add_middleware(
 
 @app.get("/")
 async def root():
-    """Root endpoint - API info"""
+    """Root endpoint"""
     return {
         "name": "WandaTools API",
         "version": "1.0.0",
-        "environment": "production",
-        "docs": "/api/docs",
-        "openapi": "/api/openapi.json"
+        "users": len(users_db),
+        "active_sessions": len(active_sessions)
     }
 
 @app.get("/health")
@@ -47,8 +92,11 @@ async def health():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "database": "healthy",
-        "version": "1.0.0"
+        "database": "in-memory",
+        "version": "1.0.0",
+        "total_users": len(users_db),
+        "active_users": len(active_sessions),
+        "total_transactions": sum(len(txns) for txns in transactions_db.values())
     }
 
 @app.get("/api/v1")
@@ -58,12 +106,31 @@ async def api_v1_info():
         "version": "1.0.0",
         "name": "WandaTools API v1",
         "status": "running",
-        "endpoints": {
-            "auth": "/api/v1/auth",
-            "tools": "/api/v1/tools",
-            "wandaai": "/api/v1/wandaai",
-            "support": "/api/v1/support"
-        }
+        "users_registered": len(users_db),
+        "active_sessions": len(active_sessions)
+    }
+
+@app.get("/api/v1/stats")
+async def get_stats():
+    """Get app statistics"""
+    total_transactions = sum(len(txns) for txns in transactions_db.values())
+    total_income = 0
+    total_expenses = 0
+    
+    for txns in transactions_db.values():
+        for txn in txns:
+            if txn["type"] == "income":
+                total_income += txn["amount"]
+            else:
+                total_expenses += txn["amount"]
+    
+    return {
+        "total_users": len(users_db),
+        "active_users": len(active_sessions),
+        "total_transactions": total_transactions,
+        "total_income": total_income,
+        "total_expenses": total_expenses,
+        "net_profit": total_income - total_expenses
     }
 
 # ═══════════════════════════════════════════════════════════
@@ -73,58 +140,125 @@ async def api_v1_info():
 @app.post("/api/v1/auth/register")
 async def register(name: str, email: str, password: str, business_type: str = None, timezone: str = "Africa/Johannesburg"):
     """Register new user"""
+    global next_user_id
+    
+    # Check if email already exists
+    if email in users_db:
+        raise HTTPException(status_code=409, detail="Email already registered")
+    
+    # Validate password
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    
+    # Create user
+    user_id = next_user_id
+    next_user_id += 1
+    
+    users_db[email] = {
+        "id": user_id,
+        "name": name,
+        "email": email,
+        "password": password,  # In production: hashed
+        "business_type": business_type,
+        "timezone": timezone,
+        "created_at": datetime.utcnow().isoformat()
+    }
+    
+    # Initialize empty transactions for user
+    transactions_db[user_id] = []
+    
+    # Create session token
+    token = f"token_{user_id}_{email[:3]}"
+    active_sessions[token] = {
+        "user_id": user_id,
+        "email": email,
+        "login_time": datetime.utcnow().isoformat()
+    }
+    
     return {
-        "access_token": "mock_access_token_" + email[:3],
-        "refresh_token": "mock_refresh_token_" + email[:3],
+        "access_token": token,
+        "refresh_token": f"refresh_{token}",
         "token_type": "bearer",
         "expires_in": 86400,
         "user": {
-            "id": 1,
+            "id": user_id,
             "name": name,
             "email": email,
-            "business_type": business_type,
-            "timezone": timezone
+            "created_at": users_db[email]["created_at"]
         }
     }
 
 @app.post("/api/v1/auth/login")
 async def login(email: str, password: str):
-    """Login user"""
+    """Login user - NOW VALIDATES CREDENTIALS"""
+    
+    # Check if user exists
+    if email not in users_db:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    user = users_db[email]
+    
+    # Check password
+    if user["password"] != password:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    # Create session token
+    token = f"token_{user['id']}_{email[:3]}_{datetime.utcnow().timestamp()}"
+    active_sessions[token] = {
+        "user_id": user["id"],
+        "email": email,
+        "login_time": datetime.utcnow().isoformat()
+    }
+    
     return {
-        "access_token": "mock_access_token_" + email[:3],
-        "refresh_token": "mock_refresh_token_" + email[:3],
+        "access_token": token,
+        "refresh_token": f"refresh_{token}",
         "token_type": "bearer",
-        "expires_in": 86400
+        "expires_in": 86400,
+        "message": f"Welcome back, {user['name']}!"
     }
 
-@app.post("/api/v1/auth/refresh")
-async def refresh_token(refresh_token: str):
-    """Refresh access token"""
-    return {
-        "access_token": "new_mock_access_token",
-        "refresh_token": refresh_token,
-        "token_type": "bearer",
-        "expires_in": 86400
-    }
+def get_user_from_token(token: str):
+    """Extract user from token"""
+    if token not in active_sessions:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return active_sessions[token]
 
 @app.get("/api/v1/auth/me")
 async def get_current_user(authorization: str = None):
     """Get current user info"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization header")
+    
+    token = authorization[7:]  # Remove "Bearer "
+    session = get_user_from_token(token)
+    user_id = session["user_id"]
+    email = session["email"]
+    
+    if email not in users_db:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    user = users_db[email]
+    
     return {
-        "id": 1,
-        "name": "Test User",
-        "email": "test@example.com",
-        "business_type": "Freelancer",
-        "timezone": "Africa/Johannesburg",
+        "id": user["id"],
+        "name": user["name"],
+        "email": user["email"],
+        "business_type": user.get("business_type"),
+        "timezone": user.get("timezone", "Africa/Johannesburg"),
         "is_active": True,
-        "is_verified": False,
-        "created_at": "2025-06-18T10:00:00",
-        "last_login": "2025-06-18T14:30:00"
+        "created_at": user["created_at"],
+        "transaction_count": len(transactions_db.get(user_id, []))
     }
 
 @app.post("/api/v1/auth/logout")
-async def logout():
+async def logout(authorization: str = None):
     """Logout user"""
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[7:]
+        if token in active_sessions:
+            del active_sessions[token]
+    
     return {"message": "Logged out successfully"}
 
 # ═══════════════════════════════════════════════════════════
@@ -132,71 +266,125 @@ async def logout():
 # ═══════════════════════════════════════════════════════════
 
 @app.post("/api/v1/tools/transactions")
-async def create_transaction(type: str, amount: float, category: str, description: str, transaction_date: str, authorization: str = None):
+async def create_transaction(
+    type: str,
+    amount: float,
+    category: str,
+    description: str,
+    transaction_date: str,
+    authorization: str = None
+):
     """Create transaction"""
-    return {
-        "id": 1,
-        "user_id": 1,
+    global next_transaction_id
+    
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
+    token = authorization[7:]
+    session = get_user_from_token(token)
+    user_id = session["user_id"]
+    
+    # Create transaction
+    transaction = {
+        "id": next_transaction_id,
+        "user_id": user_id,
         "type": type,
         "amount": amount,
         "category": category,
         "description": description,
         "transaction_date": transaction_date,
-        "created_at": "2025-06-18T10:00:00",
-        "updated_at": "2025-06-18T10:00:00"
+        "created_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.utcnow().isoformat()
     }
+    
+    next_transaction_id += 1
+    
+    if user_id not in transactions_db:
+        transactions_db[user_id] = []
+    
+    transactions_db[user_id].append(transaction)
+    
+    return transaction
 
 @app.get("/api/v1/tools/transactions")
 async def list_transactions(skip: int = 0, limit: int = 10, authorization: str = None):
-    """List transactions"""
+    """List user's transactions"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
+    token = authorization[7:]
+    session = get_user_from_token(token)
+    user_id = session["user_id"]
+    
+    user_txns = transactions_db.get(user_id, [])
+    # Sort by date descending
+    user_txns = sorted(user_txns, key=lambda x: x["transaction_date"], reverse=True)
+    
+    total = len(user_txns)
+    items = user_txns[skip:skip+limit]
+    
     return {
-        "items": [
-            {
-                "id": 1,
-                "user_id": 1,
-                "type": "income",
-                "amount": 5000.00,
-                "category": "Sales",
-                "description": "Client payment",
-                "transaction_date": "2025-06-18T10:00:00",
-                "created_at": "2025-06-18T10:00:00",
-                "updated_at": "2025-06-18T10:00:00"
-            }
-        ],
-        "total": 1,
-        "page": 1,
-        "page_size": 10,
-        "total_pages": 1
+        "items": items,
+        "total": total,
+        "page": (skip // limit) + 1,
+        "page_size": limit,
+        "total_pages": (total + limit - 1) // limit
     }
 
 @app.get("/api/v1/tools/transactions/{transaction_id}")
 async def get_transaction(transaction_id: int, authorization: str = None):
     """Get specific transaction"""
-    return {
-        "id": transaction_id,
-        "user_id": 1,
-        "type": "income",
-        "amount": 5000.00,
-        "category": "Sales",
-        "description": "Transaction",
-        "transaction_date": "2025-06-18T10:00:00",
-        "created_at": "2025-06-18T10:00:00"
-    }
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
+    token = authorization[7:]
+    session = get_user_from_token(token)
+    user_id = session["user_id"]
+    
+    for txn in transactions_db.get(user_id, []):
+        if txn["id"] == transaction_id:
+            return txn
+    
+    raise HTTPException(status_code=404, detail="Transaction not found")
 
 @app.put("/api/v1/tools/transactions/{transaction_id}")
 async def update_transaction(transaction_id: int, amount: float = None, description: str = None, authorization: str = None):
     """Update transaction"""
-    return {
-        "id": transaction_id,
-        "amount": amount,
-        "description": description,
-        "updated_at": "2025-06-18T11:00:00"
-    }
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
+    token = authorization[7:]
+    session = get_user_from_token(token)
+    user_id = session["user_id"]
+    
+    for txn in transactions_db.get(user_id, []):
+        if txn["id"] == transaction_id:
+            if amount is not None:
+                txn["amount"] = amount
+            if description is not None:
+                txn["description"] = description
+            txn["updated_at"] = datetime.utcnow().isoformat()
+            return txn
+    
+    raise HTTPException(status_code=404, detail="Transaction not found")
 
 @app.delete("/api/v1/tools/transactions/{transaction_id}")
 async def delete_transaction(transaction_id: int, authorization: str = None):
     """Delete transaction"""
-    return {"message": "Transaction deleted"}
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
+    token = authorization[7:]
+    session = get_user_from_token(token)
+    user_id = session["user_id"]
+    
+    txns = transactions_db.get(user_id, [])
+    for i, txn in enumerate(txns):
+        if txn["id"] == transaction_id:
+            txns.pop(i)
+            return {"message": "Transaction deleted"}
+    
+    raise HTTPException(status_code=404, detail="Transaction not found")
 
 # ═══════════════════════════════════════════════════════════
 # DASHBOARD ENDPOINTS
@@ -205,39 +393,64 @@ async def delete_transaction(transaction_id: int, authorization: str = None):
 @app.get("/api/v1/tools/dashboard/summary")
 async def get_dashboard_summary(month: str = None, authorization: str = None):
     """Get dashboard summary"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
+    token = authorization[7:]
+    session = get_user_from_token(token)
+    user_id = session["user_id"]
+    
+    user_txns = transactions_db.get(user_id, [])
+    
+    total_income = 0
+    total_expenses = 0
+    income_by_category = {}
+    expense_by_category = {}
+    
+    for txn in user_txns:
+        if txn["type"] == "income":
+            total_income += txn["amount"]
+            cat = txn["category"]
+            income_by_category[cat] = income_by_category.get(cat, 0) + txn["amount"]
+        else:
+            total_expenses += txn["amount"]
+            cat = txn["category"]
+            expense_by_category[cat] = expense_by_category.get(cat, 0) + txn["amount"]
+    
     return {
-        "total_income": 42500.00,
-        "total_expenses": 18240.00,
-        "net_profit": 24260.00,
-        "transaction_count": 47,
-        "month": month or "2025-06",
-        "income_by_category": {
-            "Sales": 25000.00,
-            "Services": 17500.00
-        },
-        "expense_by_category": {
-            "Rent": 6500.00,
-            "Stock": 4200.00,
-            "Salaries": 3600.00,
-            "Marketing": 1800.00,
-            "Utilities": 1140.00
-        }
+        "total_income": total_income,
+        "total_expenses": total_expenses,
+        "net_profit": total_income - total_expenses,
+        "transaction_count": len(user_txns),
+        "month": month or "current",
+        "income_by_category": income_by_category,
+        "expense_by_category": expense_by_category
     }
 
 @app.get("/api/v1/tools/dashboard/history")
 async def get_dashboard_history(months: int = 6, authorization: str = None):
     """Get multi-month history"""
-    return {
-        "summaries": [
-            {
-                "month": f"2025-{str(i).zfill(2)}",
-                "total_income": 40000 + (i * 1000),
-                "total_expenses": 16000 + (i * 200),
-                "net_profit": 24000 + (i * 800)
-            }
-            for i in range(1, months + 1)
-        ]
-    }
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
+    token = authorization[7:]
+    session = get_user_from_token(token)
+    user_id = session["user_id"]
+    
+    user_txns = transactions_db.get(user_id, [])
+    
+    summaries = []
+    for i in range(months):
+        total_income = sum(t["amount"] for t in user_txns if t["type"] == "income")
+        total_expenses = sum(t["amount"] for t in user_txns if t["type"] == "expense")
+        summaries.append({
+            "month": f"2025-{str(i+1).zfill(2)}",
+            "total_income": total_income,
+            "total_expenses": total_expenses,
+            "net_profit": total_income - total_expenses
+        })
+    
+    return {"summaries": summaries}
 
 # ═══════════════════════════════════════════════════════════
 # DOCUMENTS ENDPOINTS
@@ -246,53 +459,48 @@ async def get_dashboard_history(months: int = 6, authorization: str = None):
 @app.post("/api/v1/tools/documents")
 async def generate_document(type: str, authorization: str = None):
     """Generate document"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
+    token = authorization[7:]
+    session = get_user_from_token(token)
+    user_id = session["user_id"]
+    
+    user_txns = transactions_db.get(user_id, [])
+    total_revenue = sum(t["amount"] for t in user_txns if t["type"] == "income")
+    total_expenses = sum(t["amount"] for t in user_txns if t["type"] == "expense")
+    
     return {
         "id": 1,
-        "user_id": 1,
+        "user_id": user_id,
         "type": type,
         "status": "ready",
         "filename": f"{type}_report.pdf",
         "file_url": "/api/v1/documents/1/download",
-        "created_at": "2025-06-18T10:00:00",
-        "total_revenue": 42500.00,
-        "total_expenses": 18240.00,
-        "net_profit": 24260.00
+        "created_at": datetime.utcnow().isoformat(),
+        "total_revenue": total_revenue,
+        "total_expenses": total_expenses,
+        "net_profit": total_revenue - total_expenses
     }
 
 @app.get("/api/v1/tools/documents")
-async def list_documents(skip: int = 0, limit: int = 10, authorization: str = None):
+async def list_documents(authorization: str = None):
     """List documents"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
     return {
         "items": [
             {
                 "id": 1,
-                "user_id": 1,
-                "type": "audit_report",
+                "type": "monthly_summary",
                 "status": "ready",
-                "filename": "audit_report.pdf",
-                "file_url": "/api/v1/documents/1/download",
-                "created_at": "2025-06-18T10:00:00"
+                "filename": "summary.pdf",
+                "created_at": datetime.utcnow().isoformat()
             }
         ],
         "total": 1
     }
-
-@app.get("/api/v1/tools/documents/{document_id}")
-async def get_document(document_id: int, authorization: str = None):
-    """Get document"""
-    return {
-        "id": document_id,
-        "user_id": 1,
-        "type": "audit_report",
-        "status": "ready",
-        "filename": "report.pdf",
-        "created_at": "2025-06-18T10:00:00"
-    }
-
-@app.delete("/api/v1/tools/documents/{document_id}")
-async def delete_document(document_id: int, authorization: str = None):
-    """Delete document"""
-    return {"message": "Document deleted"}
 
 # ═══════════════════════════════════════════════════════════
 # WANDAAI ENDPOINTS
@@ -301,58 +509,59 @@ async def delete_document(document_id: int, authorization: str = None):
 @app.post("/api/v1/wandaai/query")
 async def ask_wandaai(question: str, mode: str = "insights", authorization: str = None):
     """Ask WandaAI"""
-    responses = {
-        "insights": "Your cash flow is **healthy**! Over the last 3 months, you've had R42,500 income and R18,240 expenses, giving you a net profit of R24,260. Your profit margin is 57%, which is excellent!",
-        "recommendations": "Here are my recommendations: 1) Review your largest expense categories quarterly. 2) Set aside 20% of revenue as emergency reserves. 3) Consider increasing prices to improve margins.",
-        "business": "For business strategy: Focus on your top-performing income categories (Sales and Services). Build a 3-month cash reserve for sustainability. Review pricing quarterly to ensure profitability."
-    }
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
+    token = authorization[7:]
+    session = get_user_from_token(token)
+    user_id = session["user_id"]
+    
+    # Get user data for insights
+    user_txns = transactions_db.get(user_id, [])
+    total_income = sum(t["amount"] for t in user_txns if t["type"] == "income")
+    total_expenses = sum(t["amount"] for t in user_txns if t["type"] == "expense")
+    net_profit = total_income - total_expenses
+    
+    if mode == "insights":
+        response = f"Your financial overview: **Income**: R{total_income:,.2f} | **Expenses**: R{total_expenses:,.2f} | **Profit**: R{net_profit:,.2f}. Your profit margin is {(net_profit/total_income*100 if total_income > 0 else 0):.1f}%."
+    elif mode == "recommendations":
+        response = "Based on your data: 1) Review your largest expense categories. 2) Set aside 20% as emergency reserves. 3) Consider increasing revenue streams."
+    else:
+        response = "For business growth: Focus on your top income categories. Build a 3-month cash reserve. Track metrics monthly."
     
     return {
-        "response": responses.get(mode, "Based on your financial data, here's an insight about your finances."),
+        "response": response,
         "mode": mode,
         "confidence": 0.92,
-        "insights": {"type": f"{mode}_insight"},
         "recommendations": [
-            "Review spending regularly",
+            "Review spending quarterly",
             "Set financial goals",
-            "Track key metrics monthly"
+            "Track key metrics"
         ]
     }
 
 @app.get("/api/v1/wandaai/modes")
-async def get_ai_modes(authorization: str = None):
+async def get_ai_modes():
     """Get WandaAI modes"""
     return {
         "modes": [
-            {
-                "name": "Financial Insights",
-                "id": "insights",
-                "description": "Analyse your income, expenses, and trends"
-            },
-            {
-                "name": "Smart Recommendations",
-                "id": "recommendations",
-                "description": "Get actionable money-saving and growth tips"
-            },
-            {
-                "name": "Business Assistant",
-                "id": "business",
-                "description": "Help with pricing, planning, and strategy"
-            }
+            {"name": "Financial Insights", "id": "insights"},
+            {"name": "Smart Recommendations", "id": "recommendations"},
+            {"name": "Business Assistant", "id": "business"}
         ]
     }
 
 @app.get("/api/v1/wandaai/prompts")
-async def get_sample_prompts(authorization: str = None):
+async def get_sample_prompts():
     """Get sample prompts"""
     return {
         "prompts": [
-            "How is my cash flow looking this month?",
-            "Where am I spending the most money?",
-            "What is my profit margin this month?",
-            "How can I reduce my expenses?",
-            "Am I ready to apply for a business loan?",
-            "What financial goals should I set for next month?"
+            "How is my cash flow?",
+            "Where am I spending most?",
+            "What's my profit margin?",
+            "How can I reduce expenses?",
+            "Am I ready for a loan?",
+            "Financial goals for next month?"
         ]
     }
 
@@ -361,76 +570,39 @@ async def get_sample_prompts(authorization: str = None):
 # ═══════════════════════════════════════════════════════════
 
 @app.post("/api/v1/support/contact")
-async def submit_contact(name: str, email: str, phone: str = None, subject: str = None, message: str = None):
-    """Submit contact form"""
+async def submit_contact(name: str, email: str, message: str):
+    """Submit contact"""
     return {
         "id": 1,
         "status": "received",
-        "message": f"Thank you {name}! We've received your message and will respond within 24 hours."
+        "message": f"Thank you {name}! We received your message."
     }
 
 @app.get("/api/v1/support/faq")
-async def get_faq(search: str = None, category: str = None):
-    """Get FAQ items"""
-    faqs = [
-        {
-            "id": 1,
-            "category": "security",
-            "question": "Is my financial data secure?",
-            "answer": "Yes. WandaTools uses bank-level encryption (AES-256) and complies with POPIA (South Africa's privacy law)."
-        },
-        {
-            "id": 2,
-            "category": "billing",
-            "question": "How much does WandaTools cost?",
-            "answer": "WandaTools is completely free to use with full access to all features."
-        },
-        {
-            "id": 3,
-            "category": "technical",
-            "question": "Can I export my data?",
-            "answer": "Yes, you can export your transaction history as CSV and generate professional PDF reports."
-        },
-        {
-            "id": 4,
-            "category": "security",
-            "question": "Is WandaAI trained on my personal data?",
-            "answer": "No. WandaAI uses your data only for personalized insights, not for training."
-        }
-    ]
-    
-    if search:
-        search_lower = search.lower()
-        faqs = [faq for faq in faqs if search_lower in faq["question"].lower() or search_lower in faq["answer"].lower()]
-    
-    if category:
-        faqs = [faq for faq in faqs if faq["category"] == category]
-    
-    return {"faq_items": faqs, "total": len(faqs)}
+async def get_faq():
+    """Get FAQ"""
+    return {
+        "faq_items": [
+            {
+                "id": 1,
+                "question": "Is my data secure?",
+                "answer": "Yes, we use bank-level encryption."
+            },
+            {
+                "id": 2,
+                "question": "How much does it cost?",
+                "answer": "WandaTools is completely free."
+            }
+        ],
+        "total": 2
+    }
 
 @app.get("/api/v1/support/status")
 async def support_status():
-    """Get support status"""
+    """Support status"""
     return {
         "status": "operational",
-        "support_hours": {
-            "monday_friday": "09:00 - 17:00 SAST",
-            "saturday": "10:00 - 14:00 SAST",
-            "sunday": "Closed"
-        },
-        "response_time": "24 hours",
-        "contact_methods": [
-            {
-                "method": "email",
-                "address": "support@wandatools.com",
-                "response_time": "24 hours"
-            },
-            {
-                "method": "phone",
-                "number": "+27 (0) 76 469 3531",
-                "response_time": "During business hours"
-            }
-        ]
+        "support_hours": "Mon-Fri 9AM-5PM SAST"
     }
 
 # ═══════════════════════════════════════════════════════════
@@ -440,9 +612,4 @@ async def support_status():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=port,
-        reload=False
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
