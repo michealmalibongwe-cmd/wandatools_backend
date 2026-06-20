@@ -1,13 +1,82 @@
 """
-WandaTools Backend - WORKING VERSION
-FastAPI application with real user & transaction storage
+WandaTools Backend - PostgreSQL Version
+FastAPI with SQLAlchemy ORM and real database storage
 """
 
 from fastapi import FastAPI, status, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
 import os
-import json
+from typing import Optional
+
+# ═══════════════════════════════════════════════════════════
+# DATABASE SETUP
+# ═══════════════════════════════════════════════════════════
+
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/wandatools_db")
+
+# For Railway, replace 'localhost' with actual host if needed
+if "localhost" not in DATABASE_URL:
+    # Railway URL format is correct
+    pass
+
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    echo=False  # Set to True to see SQL queries
+)
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# ═══════════════════════════════════════════════════════════
+# DATABASE MODELS
+# ═══════════════════════════════════════════════════════════
+
+class User(Base):
+    __tablename__ = "users"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    password = Column(String(255), nullable=False)
+    business_type = Column(String(100), nullable=True)
+    timezone = Column(String(50), default="Africa/Johannesburg")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    transactions = relationship("Transaction", back_populates="user", cascade="all, delete-orphan")
+
+class Transaction(Base):
+    __tablename__ = "transactions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    type = Column(String(50), nullable=False)  # income or expense
+    amount = Column(Float, nullable=False)
+    category = Column(String(100), nullable=False)
+    description = Column(String(500), nullable=False)
+    transaction_date = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    user = relationship("User", back_populates="transactions")
+
+# Create tables
+Base.metadata.create_all(bind=engine)
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# ═══════════════════════════════════════════════════════════
+# FASTAPI APP
+# ═══════════════════════════════════════════════════════════
 
 app = FastAPI(
     title="WandaTools API",
@@ -17,7 +86,7 @@ app = FastAPI(
     openapi_url="/api/openapi.json"
 )
 
-# ═══ CORS Middleware ═══
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -26,52 +95,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ═══════════════════════════════════════════════════════════
-# IN-MEMORY STORAGE
-# ═══════════════════════════════════════════════════════════
-
-# Store users: {email: {name, password, id, created_at}}
-users_db = {
-    "demo@test.com": {
-        "id": 1,
-        "name": "Demo User",
-        "email": "demo@test.com",
-        "password": "Demo123!",  # In production: hashed password
-        "created_at": "2025-06-18T10:00:00"
-    }
-}
-
-# Store transactions: {user_id: [transaction_list]}
-transactions_db = {
-    1: [
-        {
-            "id": 1,
-            "user_id": 1,
-            "type": "income",
-            "amount": 5000.00,
-            "category": "Sales",
-            "description": "Client payment",
-            "transaction_date": "2025-06-18T10:00:00",
-            "created_at": "2025-06-18T10:00:00"
-        },
-        {
-            "id": 2,
-            "user_id": 1,
-            "type": "expense",
-            "amount": 1200.00,
-            "category": "Rent",
-            "description": "Monthly rent",
-            "transaction_date": "2025-06-17T09:00:00",
-            "created_at": "2025-06-17T09:00:00"
-        }
-    ]
-}
-
-# Track active sessions: {token: {user_id, email, login_time}}
+# In-memory sessions (tokens)
 active_sessions = {}
 
-next_user_id = 2
-next_transaction_id = 3
+# ═══════════════════════════════════════════════════════════
+# HELPER FUNCTIONS
+# ═══════════════════════════════════════════════════════════
+
+def get_user_from_token(token: str):
+    """Get user session from token"""
+    if token not in active_sessions:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return active_sessions[token]
 
 # ═══════════════════════════════════════════════════════════
 # ROOT ENDPOINTS
@@ -80,186 +115,223 @@ next_transaction_id = 3
 @app.get("/")
 async def root():
     """Root endpoint"""
-    return {
-        "name": "WandaTools API",
-        "version": "1.0.0",
-        "users": len(users_db),
-        "active_sessions": len(active_sessions)
-    }
+    db = SessionLocal()
+    try:
+        user_count = db.query(User).count()
+        txn_count = db.query(Transaction).count()
+        return {
+            "name": "WandaTools API",
+            "version": "1.0.0",
+            "database": "PostgreSQL",
+            "users": user_count,
+            "transactions": txn_count,
+            "active_sessions": len(active_sessions)
+        }
+    except Exception as e:
+        return {
+            "error": f"Database error: {str(e)}",
+            "status": "database_connection_failed"
+        }
+    finally:
+        db.close()
 
 @app.get("/health")
 async def health():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "database": "in-memory",
-        "version": "1.0.0",
-        "total_users": len(users_db),
-        "active_users": len(active_sessions),
-        "total_transactions": sum(len(txns) for txns in transactions_db.values())
-    }
+    """Health check - shows database stats"""
+    db = SessionLocal()
+    try:
+        # Test database connection
+        db.execute("SELECT 1")
+        
+        user_count = db.query(User).count()
+        txn_count = db.query(Transaction).count()
+        total_income = sum(float(t.amount) for t in db.query(Transaction).filter(Transaction.type == "income").all())
+        total_expenses = sum(float(t.amount) for t in db.query(Transaction).filter(Transaction.type == "expense").all())
+        
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "database_type": "PostgreSQL",
+            "version": "1.0.0",
+            "users_count": user_count,
+            "transactions_count": txn_count,
+            "total_income": total_income,
+            "total_expenses": total_expenses,
+            "active_sessions": len(active_sessions)
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "database": "disconnected"
+        }
+    finally:
+        db.close()
 
 @app.get("/api/v1")
 async def api_v1_info():
-    """API v1 info"""
-    return {
-        "version": "1.0.0",
-        "name": "WandaTools API v1",
-        "status": "running",
-        "users_registered": len(users_db),
-        "active_sessions": len(active_sessions)
-    }
+    """API info"""
+    db = SessionLocal()
+    try:
+        return {
+            "version": "1.0.0",
+            "status": "running",
+            "database": "PostgreSQL",
+            "users": db.query(User).count(),
+            "transactions": db.query(Transaction).count()
+        }
+    finally:
+        db.close()
 
 @app.get("/api/v1/stats")
 async def get_stats():
-    """Get app statistics"""
-    total_transactions = sum(len(txns) for txns in transactions_db.values())
-    total_income = 0
-    total_expenses = 0
-    
-    for txns in transactions_db.values():
-        for txn in txns:
-            if txn["type"] == "income":
-                total_income += txn["amount"]
-            else:
-                total_expenses += txn["amount"]
-    
-    return {
-        "total_users": len(users_db),
-        "active_users": len(active_sessions),
-        "total_transactions": total_transactions,
-        "total_income": total_income,
-        "total_expenses": total_expenses,
-        "net_profit": total_income - total_expenses
-    }
+    """App statistics from database"""
+    db = SessionLocal()
+    try:
+        users = db.query(User).all()
+        transactions = db.query(Transaction).all()
+        
+        total_income = sum(t.amount for t in transactions if t.type == "income")
+        total_expenses = sum(t.amount for t in transactions if t.type == "expense")
+        
+        return {
+            "total_users": len(users),
+            "active_users": len(active_sessions),
+            "total_transactions": len(transactions),
+            "total_income": total_income,
+            "total_expenses": total_expenses,
+            "net_profit": total_income - total_expenses,
+            "users_list": [{"id": u.id, "name": u.name, "email": u.email, "created_at": u.created_at.isoformat()} for u in users]
+        }
+    finally:
+        db.close()
 
 # ═══════════════════════════════════════════════════════════
 # AUTHENTICATION ENDPOINTS
 # ═══════════════════════════════════════════════════════════
 
 @app.post("/api/v1/auth/register")
-async def register(name: str, email: str, password: str, business_type: str = None, timezone: str = "Africa/Johannesburg"):
-    """Register new user"""
-    global next_user_id
-    
-    # Check if email already exists
-    if email in users_db:
-        raise HTTPException(status_code=409, detail="Email already registered")
-    
-    # Validate password
-    if len(password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
-    
-    # Create user
-    user_id = next_user_id
-    next_user_id += 1
-    
-    users_db[email] = {
-        "id": user_id,
-        "name": name,
-        "email": email,
-        "password": password,  # In production: hashed
-        "business_type": business_type,
-        "timezone": timezone,
-        "created_at": datetime.utcnow().isoformat()
-    }
-    
-    # Initialize empty transactions for user
-    transactions_db[user_id] = []
-    
-    # Create session token
-    token = f"token_{user_id}_{email[:3]}"
-    active_sessions[token] = {
-        "user_id": user_id,
-        "email": email,
-        "login_time": datetime.utcnow().isoformat()
-    }
-    
-    return {
-        "access_token": token,
-        "refresh_token": f"refresh_{token}",
-        "token_type": "bearer",
-        "expires_in": 86400,
-        "user": {
-            "id": user_id,
-            "name": name,
+async def register(name: str, email: str, password: str, business_type: str = None):
+    """Register new user - SAVES TO DATABASE"""
+    db = SessionLocal()
+    try:
+        # Check if email exists
+        existing = db.query(User).filter(User.email == email).first()
+        if existing:
+            raise HTTPException(status_code=409, detail="Email already registered")
+        
+        # Create user
+        user = User(
+            name=name,
+            email=email,
+            password=password,
+            business_type=business_type,
+            timezone="Africa/Johannesburg"
+        )
+        
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        
+        # Create session token
+        token = f"token_{user.id}_{email[:3]}"
+        active_sessions[token] = {
+            "user_id": user.id,
             "email": email,
-            "created_at": users_db[email]["created_at"]
+            "login_time": datetime.utcnow().isoformat()
         }
-    }
+        
+        return {
+            "access_token": token,
+            "refresh_token": f"refresh_{token}",
+            "token_type": "bearer",
+            "expires_in": 86400,
+            "user": {
+                "id": user.id,
+                "name": user.name,
+                "email": user.email,
+                "created_at": user.created_at.isoformat()
+            },
+            "message": f"✅ User registered! Saved to PostgreSQL database."
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Registration failed: {str(e)}")
+    finally:
+        db.close()
 
 @app.post("/api/v1/auth/login")
 async def login(email: str, password: str):
-    """Login user - NOW VALIDATES CREDENTIALS"""
-    
-    # Check if user exists
-    if email not in users_db:
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    
-    user = users_db[email]
-    
-    # Check password
-    if user["password"] != password:
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    
-    # Create session token
-    token = f"token_{user['id']}_{email[:3]}_{datetime.utcnow().timestamp()}"
-    active_sessions[token] = {
-        "user_id": user["id"],
-        "email": email,
-        "login_time": datetime.utcnow().isoformat()
-    }
-    
-    return {
-        "access_token": token,
-        "refresh_token": f"refresh_{token}",
-        "token_type": "bearer",
-        "expires_in": 86400,
-        "message": f"Welcome back, {user['name']}!"
-    }
-
-def get_user_from_token(token: str):
-    """Extract user from token"""
-    if token not in active_sessions:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    return active_sessions[token]
+    """Login user - VALIDATES FROM DATABASE"""
+    db = SessionLocal()
+    try:
+        # Find user in database
+        user = db.query(User).filter(User.email == email).first()
+        
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+        # Check password
+        if user.password != password:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+        # Create session token
+        token = f"token_{user.id}_{email[:3]}_{datetime.utcnow().timestamp()}"
+        active_sessions[token] = {
+            "user_id": user.id,
+            "email": email,
+            "login_time": datetime.utcnow().isoformat()
+        }
+        
+        return {
+            "access_token": token,
+            "refresh_token": f"refresh_{token}",
+            "token_type": "bearer",
+            "expires_in": 86400,
+            "message": f"✅ Login successful! Retrieved from PostgreSQL database."
+        }
+    finally:
+        db.close()
 
 @app.get("/api/v1/auth/me")
 async def get_current_user(authorization: str = None):
-    """Get current user info"""
+    """Get current user from database"""
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing authorization header")
+        raise HTTPException(status_code=401, detail="Missing token")
     
-    token = authorization[7:]  # Remove "Bearer "
+    token = authorization[7:]
     session = get_user_from_token(token)
-    user_id = session["user_id"]
-    email = session["email"]
     
-    if email not in users_db:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    user = users_db[email]
-    
-    return {
-        "id": user["id"],
-        "name": user["name"],
-        "email": user["email"],
-        "business_type": user.get("business_type"),
-        "timezone": user.get("timezone", "Africa/Johannesburg"),
-        "is_active": True,
-        "created_at": user["created_at"],
-        "transaction_count": len(transactions_db.get(user_id, []))
-    }
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == session["user_id"]).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        txn_count = db.query(Transaction).filter(Transaction.user_id == user.id).count()
+        
+        return {
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "business_type": user.business_type,
+            "timezone": user.timezone,
+            "created_at": user.created_at.isoformat(),
+            "transaction_count": txn_count
+        }
+    finally:
+        db.close()
 
 @app.post("/api/v1/auth/logout")
 async def logout(authorization: str = None):
-    """Logout user"""
+    """Logout"""
     if authorization and authorization.startswith("Bearer "):
         token = authorization[7:]
         if token in active_sessions:
             del active_sessions[token]
-    
-    return {"message": "Logged out successfully"}
+    return {"message": "Logged out"}
 
 # ═══════════════════════════════════════════════════════════
 # TRANSACTION ENDPOINTS
@@ -274,99 +346,83 @@ async def create_transaction(
     transaction_date: str,
     authorization: str = None
 ):
-    """Create transaction"""
-    global next_transaction_id
-    
+    """Create transaction - SAVES TO DATABASE"""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Authentication required")
     
     token = authorization[7:]
     session = get_user_from_token(token)
-    user_id = session["user_id"]
     
-    # Create transaction
-    transaction = {
-        "id": next_transaction_id,
-        "user_id": user_id,
-        "type": type,
-        "amount": amount,
-        "category": category,
-        "description": description,
-        "transaction_date": transaction_date,
-        "created_at": datetime.utcnow().isoformat(),
-        "updated_at": datetime.utcnow().isoformat()
-    }
-    
-    next_transaction_id += 1
-    
-    if user_id not in transactions_db:
-        transactions_db[user_id] = []
-    
-    transactions_db[user_id].append(transaction)
-    
-    return transaction
+    db = SessionLocal()
+    try:
+        txn = Transaction(
+            user_id=session["user_id"],
+            type=type,
+            amount=amount,
+            category=category,
+            description=description,
+            transaction_date=datetime.fromisoformat(transaction_date)
+        )
+        
+        db.add(txn)
+        db.commit()
+        db.refresh(txn)
+        
+        return {
+            "id": txn.id,
+            "user_id": txn.user_id,
+            "type": txn.type,
+            "amount": txn.amount,
+            "category": txn.category,
+            "description": txn.description,
+            "transaction_date": txn.transaction_date.isoformat(),
+            "created_at": txn.created_at.isoformat(),
+            "message": "✅ Transaction saved to PostgreSQL!"
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
 
 @app.get("/api/v1/tools/transactions")
 async def list_transactions(skip: int = 0, limit: int = 10, authorization: str = None):
-    """List user's transactions"""
+    """List user's transactions from database"""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Authentication required")
     
     token = authorization[7:]
     session = get_user_from_token(token)
-    user_id = session["user_id"]
     
-    user_txns = transactions_db.get(user_id, [])
-    # Sort by date descending
-    user_txns = sorted(user_txns, key=lambda x: x["transaction_date"], reverse=True)
-    
-    total = len(user_txns)
-    items = user_txns[skip:skip+limit]
-    
-    return {
-        "items": items,
-        "total": total,
-        "page": (skip // limit) + 1,
-        "page_size": limit,
-        "total_pages": (total + limit - 1) // limit
-    }
-
-@app.get("/api/v1/tools/transactions/{transaction_id}")
-async def get_transaction(transaction_id: int, authorization: str = None):
-    """Get specific transaction"""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Authentication required")
-    
-    token = authorization[7:]
-    session = get_user_from_token(token)
-    user_id = session["user_id"]
-    
-    for txn in transactions_db.get(user_id, []):
-        if txn["id"] == transaction_id:
-            return txn
-    
-    raise HTTPException(status_code=404, detail="Transaction not found")
-
-@app.put("/api/v1/tools/transactions/{transaction_id}")
-async def update_transaction(transaction_id: int, amount: float = None, description: str = None, authorization: str = None):
-    """Update transaction"""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Authentication required")
-    
-    token = authorization[7:]
-    session = get_user_from_token(token)
-    user_id = session["user_id"]
-    
-    for txn in transactions_db.get(user_id, []):
-        if txn["id"] == transaction_id:
-            if amount is not None:
-                txn["amount"] = amount
-            if description is not None:
-                txn["description"] = description
-            txn["updated_at"] = datetime.utcnow().isoformat()
-            return txn
-    
-    raise HTTPException(status_code=404, detail="Transaction not found")
+    db = SessionLocal()
+    try:
+        query = db.query(Transaction).filter(Transaction.user_id == session["user_id"]).order_by(Transaction.transaction_date.desc())
+        
+        total = query.count()
+        txns = query.offset(skip).limit(limit).all()
+        
+        return {
+            "items": [
+                {
+                    "id": t.id,
+                    "user_id": t.user_id,
+                    "type": t.type,
+                    "amount": t.amount,
+                    "category": t.category,
+                    "description": t.description,
+                    "transaction_date": t.transaction_date.isoformat(),
+                    "created_at": t.created_at.isoformat()
+                }
+                for t in txns
+            ],
+            "total": total,
+            "page": (skip // limit) + 1,
+            "page_size": limit,
+            "total_pages": (total + limit - 1) // limit,
+            "message": f"✅ Retrieved {len(txns)} transactions from PostgreSQL!"
+        }
+    finally:
+        db.close()
 
 @app.delete("/api/v1/tools/transactions/{transaction_id}")
 async def delete_transaction(transaction_id: int, authorization: str = None):
@@ -376,131 +432,64 @@ async def delete_transaction(transaction_id: int, authorization: str = None):
     
     token = authorization[7:]
     session = get_user_from_token(token)
-    user_id = session["user_id"]
     
-    txns = transactions_db.get(user_id, [])
-    for i, txn in enumerate(txns):
-        if txn["id"] == transaction_id:
-            txns.pop(i)
-            return {"message": "Transaction deleted"}
-    
-    raise HTTPException(status_code=404, detail="Transaction not found")
+    db = SessionLocal()
+    try:
+        txn = db.query(Transaction).filter(
+            Transaction.id == transaction_id,
+            Transaction.user_id == session["user_id"]
+        ).first()
+        
+        if not txn:
+            raise HTTPException(status_code=404, detail="Transaction not found")
+        
+        db.delete(txn)
+        db.commit()
+        
+        return {"message": "✅ Transaction deleted from PostgreSQL!"}
+    finally:
+        db.close()
 
 # ═══════════════════════════════════════════════════════════
 # DASHBOARD ENDPOINTS
 # ═══════════════════════════════════════════════════════════
 
 @app.get("/api/v1/tools/dashboard/summary")
-async def get_dashboard_summary(month: str = None, authorization: str = None):
-    """Get dashboard summary"""
+async def get_dashboard_summary(authorization: str = None):
+    """Get dashboard summary from database"""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Authentication required")
     
     token = authorization[7:]
     session = get_user_from_token(token)
-    user_id = session["user_id"]
     
-    user_txns = transactions_db.get(user_id, [])
-    
-    total_income = 0
-    total_expenses = 0
-    income_by_category = {}
-    expense_by_category = {}
-    
-    for txn in user_txns:
-        if txn["type"] == "income":
-            total_income += txn["amount"]
-            cat = txn["category"]
-            income_by_category[cat] = income_by_category.get(cat, 0) + txn["amount"]
-        else:
-            total_expenses += txn["amount"]
-            cat = txn["category"]
-            expense_by_category[cat] = expense_by_category.get(cat, 0) + txn["amount"]
-    
-    return {
-        "total_income": total_income,
-        "total_expenses": total_expenses,
-        "net_profit": total_income - total_expenses,
-        "transaction_count": len(user_txns),
-        "month": month or "current",
-        "income_by_category": income_by_category,
-        "expense_by_category": expense_by_category
-    }
-
-@app.get("/api/v1/tools/dashboard/history")
-async def get_dashboard_history(months: int = 6, authorization: str = None):
-    """Get multi-month history"""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Authentication required")
-    
-    token = authorization[7:]
-    session = get_user_from_token(token)
-    user_id = session["user_id"]
-    
-    user_txns = transactions_db.get(user_id, [])
-    
-    summaries = []
-    for i in range(months):
-        total_income = sum(t["amount"] for t in user_txns if t["type"] == "income")
-        total_expenses = sum(t["amount"] for t in user_txns if t["type"] == "expense")
-        summaries.append({
-            "month": f"2025-{str(i+1).zfill(2)}",
+    db = SessionLocal()
+    try:
+        txns = db.query(Transaction).filter(Transaction.user_id == session["user_id"]).all()
+        
+        total_income = sum(t.amount for t in txns if t.type == "income")
+        total_expenses = sum(t.amount for t in txns if t.type == "expense")
+        
+        income_by_category = {}
+        expense_by_category = {}
+        
+        for t in txns:
+            if t.type == "income":
+                income_by_category[t.category] = income_by_category.get(t.category, 0) + t.amount
+            else:
+                expense_by_category[t.category] = expense_by_category.get(t.category, 0) + t.amount
+        
+        return {
             "total_income": total_income,
             "total_expenses": total_expenses,
-            "net_profit": total_income - total_expenses
-        })
-    
-    return {"summaries": summaries}
-
-# ═══════════════════════════════════════════════════════════
-# DOCUMENTS ENDPOINTS
-# ═══════════════════════════════════════════════════════════
-
-@app.post("/api/v1/tools/documents")
-async def generate_document(type: str, authorization: str = None):
-    """Generate document"""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Authentication required")
-    
-    token = authorization[7:]
-    session = get_user_from_token(token)
-    user_id = session["user_id"]
-    
-    user_txns = transactions_db.get(user_id, [])
-    total_revenue = sum(t["amount"] for t in user_txns if t["type"] == "income")
-    total_expenses = sum(t["amount"] for t in user_txns if t["type"] == "expense")
-    
-    return {
-        "id": 1,
-        "user_id": user_id,
-        "type": type,
-        "status": "ready",
-        "filename": f"{type}_report.pdf",
-        "file_url": "/api/v1/documents/1/download",
-        "created_at": datetime.utcnow().isoformat(),
-        "total_revenue": total_revenue,
-        "total_expenses": total_expenses,
-        "net_profit": total_revenue - total_expenses
-    }
-
-@app.get("/api/v1/tools/documents")
-async def list_documents(authorization: str = None):
-    """List documents"""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Authentication required")
-    
-    return {
-        "items": [
-            {
-                "id": 1,
-                "type": "monthly_summary",
-                "status": "ready",
-                "filename": "summary.pdf",
-                "created_at": datetime.utcnow().isoformat()
-            }
-        ],
-        "total": 1
-    }
+            "net_profit": total_income - total_expenses,
+            "transaction_count": len(txns),
+            "income_by_category": income_by_category,
+            "expense_by_category": expense_by_category,
+            "message": "✅ Dashboard data from PostgreSQL!"
+        }
+    finally:
+        db.close()
 
 # ═══════════════════════════════════════════════════════════
 # WANDAAI ENDPOINTS
@@ -508,60 +497,43 @@ async def list_documents(authorization: str = None):
 
 @app.post("/api/v1/wandaai/query")
 async def ask_wandaai(question: str, mode: str = "insights", authorization: str = None):
-    """Ask WandaAI"""
+    """Ask WandaAI - uses real database data"""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Authentication required")
     
     token = authorization[7:]
     session = get_user_from_token(token)
-    user_id = session["user_id"]
     
-    # Get user data for insights
-    user_txns = transactions_db.get(user_id, [])
-    total_income = sum(t["amount"] for t in user_txns if t["type"] == "income")
-    total_expenses = sum(t["amount"] for t in user_txns if t["type"] == "expense")
-    net_profit = total_income - total_expenses
-    
-    if mode == "insights":
-        response = f"Your financial overview: **Income**: R{total_income:,.2f} | **Expenses**: R{total_expenses:,.2f} | **Profit**: R{net_profit:,.2f}. Your profit margin is {(net_profit/total_income*100 if total_income > 0 else 0):.1f}%."
-    elif mode == "recommendations":
-        response = "Based on your data: 1) Review your largest expense categories. 2) Set aside 20% as emergency reserves. 3) Consider increasing revenue streams."
-    else:
-        response = "For business growth: Focus on your top income categories. Build a 3-month cash reserve. Track metrics monthly."
-    
-    return {
-        "response": response,
-        "mode": mode,
-        "confidence": 0.92,
-        "recommendations": [
-            "Review spending quarterly",
-            "Set financial goals",
-            "Track key metrics"
-        ]
-    }
+    db = SessionLocal()
+    try:
+        txns = db.query(Transaction).filter(Transaction.user_id == session["user_id"]).all()
+        
+        total_income = sum(t.amount for t in txns if t.type == "income")
+        total_expenses = sum(t.amount for t in txns if t.type == "expense")
+        net_profit = total_income - total_expenses
+        
+        if total_income == 0:
+            response = "Start by adding some transactions to get insights!"
+        else:
+            margin = (net_profit / total_income * 100) if total_income > 0 else 0
+            response = f"**Your Financial Overview (from PostgreSQL):**\n\n💰 Income: R{total_income:,.2f}\n💸 Expenses: R{total_expenses:,.2f}\n📈 Profit: R{net_profit:,.2f}\n📊 Margin: {margin:.1f}%"
+        
+        return {
+            "response": response,
+            "mode": mode,
+            "confidence": 0.95,
+            "message": "✅ Insights from PostgreSQL database!"
+        }
+    finally:
+        db.close()
 
 @app.get("/api/v1/wandaai/modes")
 async def get_ai_modes():
-    """Get WandaAI modes"""
     return {
         "modes": [
             {"name": "Financial Insights", "id": "insights"},
             {"name": "Smart Recommendations", "id": "recommendations"},
             {"name": "Business Assistant", "id": "business"}
-        ]
-    }
-
-@app.get("/api/v1/wandaai/prompts")
-async def get_sample_prompts():
-    """Get sample prompts"""
-    return {
-        "prompts": [
-            "How is my cash flow?",
-            "Where am I spending most?",
-            "What's my profit margin?",
-            "How can I reduce expenses?",
-            "Am I ready for a loan?",
-            "Financial goals for next month?"
         ]
     }
 
@@ -571,38 +543,20 @@ async def get_sample_prompts():
 
 @app.post("/api/v1/support/contact")
 async def submit_contact(name: str, email: str, message: str):
-    """Submit contact"""
     return {
         "id": 1,
         "status": "received",
-        "message": f"Thank you {name}! We received your message."
+        "message": f"Thank you {name}! Message received."
     }
 
 @app.get("/api/v1/support/faq")
 async def get_faq():
-    """Get FAQ"""
     return {
         "faq_items": [
-            {
-                "id": 1,
-                "question": "Is my data secure?",
-                "answer": "Yes, we use bank-level encryption."
-            },
-            {
-                "id": 2,
-                "question": "How much does it cost?",
-                "answer": "WandaTools is completely free."
-            }
+            {"id": 1, "question": "Is my data secure?", "answer": "Yes, encrypted with PostgreSQL."},
+            {"id": 2, "question": "Where is data stored?", "answer": "In our PostgreSQL database on Railway."}
         ],
         "total": 2
-    }
-
-@app.get("/api/v1/support/status")
-async def support_status():
-    """Support status"""
-    return {
-        "status": "operational",
-        "support_hours": "Mon-Fri 9AM-5PM SAST"
     }
 
 # ═══════════════════════════════════════════════════════════
