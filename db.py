@@ -4,6 +4,8 @@ SQLAlchemy setup for PostgreSQL connection
 """
 
 from sqlalchemy import create_engine, event
+from sqlalchemy.exc import NoSuchModuleError
+import sys
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.pool import StaticPool
 from config import settings
@@ -21,13 +23,41 @@ if settings.ENVIRONMENT == "testing":
     )
 else:
     # Use PostgreSQL for production/development
-    engine = create_engine(
-        DATABASE_URL,
-        echo=settings.DEBUG,  # Log SQL queries in debug mode
-        pool_pre_ping=True,   # Verify connections before using
-        pool_size=10,
-        max_overflow=20,
-    )
+    if not DATABASE_URL:
+        print("DATABASE_URL environment variable is not set. Exiting.")
+        sys.exit(1)
+
+    try:
+        engine = create_engine(
+            DATABASE_URL,
+            echo=settings.DEBUG,  # Log SQL queries in debug mode
+            pool_pre_ping=True,   # Verify connections before using
+            pool_size=10,
+            max_overflow=20,
+        )
+    except (NoSuchModuleError, ImportError) as e:
+        print(
+            "Database driver not installed or invalid dialect. "
+            "Install a PostgreSQL DB driver (e.g. psycopg2-binary) and try again."
+        )
+        sys.exit(1)
+    except Exception as e:
+        print(f"Failed to create database engine: {e}")
+        raise
+
+    # Quick connection test to surface obvious connectivity/driver issues early
+    try:
+        with engine.connect() as conn:
+            conn.execute("SELECT 1")
+            print("Database connection test: OK")
+    except (NoSuchModuleError, ImportError):
+        print(
+            "Database driver missing when attempting connection. "
+            "Install a PostgreSQL DB driver (e.g. psycopg2-binary) and try again."
+        )
+        sys.exit(1)
+    except Exception as e:
+        print(f"Database connection test failed (DB may be unreachable): {e}")
 
 # Create session factory
 SessionLocal = sessionmaker(

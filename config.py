@@ -9,10 +9,8 @@ class Settings:
     """Application settings loaded from environment variables"""
     
     # Database
-    DATABASE_URL = os.getenv(
-        "DATABASE_URL",
-        "postgresql://postgres:postgres@localhost:5432/wandatools_db"
-    )
+    # Require DATABASE_URL to be set in the environment. No localhost fallback.
+    DATABASE_URL = os.getenv("DATABASE_URL")
     
     # JWT & Security
     SECRET_KEY = os.getenv(
