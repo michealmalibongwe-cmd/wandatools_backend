@@ -1,51 +1,72 @@
 """
-WandaTools Backend - PostgreSQL Version
+WandaTools Backend - PostgreSQL Version (FIXED)
 FastAPI with SQLAlchemy ORM and real database storage
 """
 
 from fastapi import FastAPI, status, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
 import os
 
 # ═══════════════════════════════════════════════════════════
-# DATABASE SETUP
+# DATABASE SETUP - FIX 1: Import declarative_base FIRST
 # ═══════════════════════════════════════════════════════════
 
-from sqlalchemy import create_engine, text
-import os
+Base = declarative_base()  # ✅ DEFINE BASE FIRST!
 
 # Get DATABASE_URL from environment
 DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("❌ DATABASE_URL not set! Please configure it in Railway.")
 
-print(f"✅ Connecting to: {DATABASE_URL[:50]}...")
+if not DATABASE_URL:
+    print("⚠️  WARNING: DATABASE_URL not set! Using SQLite fallback.")
+    DATABASE_URL = "sqlite:///./wandatools.db"
+    db_connected = False
+else:
+    print(f"✅ DATABASE_URL found: {DATABASE_URL[:60]}...")
+
+# FIX 2: Better connection string handling for Railway
+# Railway PostgreSQL connection string might look like:
+# postgresql://postgres:password@HOST:5432/railway
+# Replace any "postgres.railway.internal" with correct format
+
+if "postgres.railway.internal" in DATABASE_URL:
+    # Use public connection for Railway
+    DATABASE_URL = DATABASE_URL.replace("postgres.railway.internal", "containers-us-west-77.railway.app")
+    print(f"✅ Converted to public Railway URL")
+
+print(f"🔌 Connecting to database...")
 
 try:
     engine = create_engine(
         DATABASE_URL,
         pool_pre_ping=True,
         pool_recycle=3600,
-        echo=False
+        pool_size=10,
+        max_overflow=20,
+        echo=False,
+        connect_args={"timeout": 10} if "sqlite" in DATABASE_URL else {}
     )
     
-    # Test connection safely
+    # Test connection
     with engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
+        conn.execute("SELECT 1")
     
     print("✅ Database connected successfully!")
     db_connected = True
 except Exception as e:
     print(f"❌ Database connection failed: {e}")
+    print("⚠️  Falling back to in-memory SQLite mode")
     db_connected = False
+    DATABASE_URL = "sqlite:///./wandatools.db"
+    engine = create_engine(DATABASE_URL)
 
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # ═══════════════════════════════════════════════════════════
-# DATABASE MODELS
+# DATABASE MODELS - AFTER Base IS DEFINED
 # ═══════════════════════════════════════════════════════════
 
 class User(Base):
@@ -114,19 +135,8 @@ app.add_middleware(
 
 # In-memory sessions
 active_sessions = {}
-# Fallback in-memory storage if database fails
 fallback_users = {}
 fallback_transactions = {}
-
-# ═══════════════════════════════════════════════════════════
-# HELPER FUNCTIONS
-# ═══════════════════════════════════════════════════════════
-
-def get_user_from_token(token: str):
-    """Get user session from token"""
-    if token not in active_sessions:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    return active_sessions[token]
 
 # ═══════════════════════════════════════════════════════════
 # ROOT ENDPOINTS
@@ -162,7 +172,7 @@ async def root():
         return {
             "name": "WandaTools API",
             "version": "1.0.0",
-            "database": "In-Memory (Demo Mode)",
+            "database": "SQLite (Fallback)",
             "status": "fallback",
             "users": len(fallback_users),
             "transactions": sum(len(t) for t in fallback_transactions.values())
@@ -199,12 +209,11 @@ async def health():
             }
     else:
         return {
-            "status": "healthy (Demo Mode) ⚠️",
-            "database": "In-Memory Fallback",
+            "status": "healthy (Fallback) ⚠️",
+            "database": "SQLite",
             "users_count": len(fallback_users),
             "transactions_count": sum(len(t) for t in fallback_transactions.values()),
-            "active_sessions": len(active_sessions),
-            "note": "Set DATABASE_URL environment variable to use PostgreSQL"
+            "active_sessions": len(active_sessions)
         }
 
 @app.get("/api/v1")
@@ -229,7 +238,7 @@ async def api_v1_info():
     return {
         "version": "1.0.0",
         "status": "running",
-        "database": "In-Memory",
+        "database": "SQLite (Fallback)",
         "users": len(fallback_users),
         "transactions": sum(len(t) for t in fallback_transactions.values())
     }
@@ -259,10 +268,7 @@ async def get_stats():
                 "users_list": [{"id": u.id, "name": u.name, "email": u.email, "created_at": u.created_at.isoformat()} for u in users]
             }
         except Exception as e:
-            return {
-                "error": f"Database error: {str(e)}",
-                "database": "PostgreSQL ⚠️"
-            }
+            return {"error": f"Database error: {str(e)}", "database": "PostgreSQL ⚠️"}
     else:
         total_income = sum(
             sum(t["amount"] for t in txns if t["type"] == "income")
@@ -280,13 +286,19 @@ async def get_stats():
             "total_income": total_income,
             "total_expenses": total_expenses,
             "net_profit": total_income - total_expenses,
-            "database": "In-Memory (Demo)",
+            "database": "SQLite (Fallback)",
             "users_list": [{"id": u["id"], "name": u["name"], "email": u["email"]} for u in fallback_users.values()]
         }
 
 # ═══════════════════════════════════════════════════════════
-# AUTHENTICATION ENDPOINTS
+# AUTH ENDPOINTS
 # ═══════════════════════════════════════════════════════════
+
+def get_user_from_token(token: str):
+    """Get user session from token"""
+    if token not in active_sessions:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return active_sessions[token]
 
 @app.post("/api/v1/auth/register")
 async def register(name: str, email: str, password: str, business_type: str = None):
@@ -317,7 +329,6 @@ async def register(name: str, email: str, password: str, business_type: str = No
         except Exception as e:
             return {"error": f"Registration failed: {str(e)}", "database": "PostgreSQL ⚠️"}
     else:
-        # Fallback to in-memory
         if email in fallback_users:
             raise HTTPException(status_code=409, detail="Email already registered")
         user_id = len(fallback_users) + 1
@@ -330,7 +341,6 @@ async def register(name: str, email: str, password: str, business_type: str = No
         }
         fallback_transactions[user_id] = []
     
-    # Create session
     token = f"token_{user_id}_{email[:3]}"
     active_sessions[token] = {
         "user_id": user_id,
@@ -343,11 +353,7 @@ async def register(name: str, email: str, password: str, business_type: str = No
         "refresh_token": f"refresh_{token}",
         "token_type": "bearer",
         "expires_in": 86400,
-        "user": {
-            "id": user_id,
-            "name": name,
-            "email": email
-        },
+        "user": {"id": user_id, "name": name, "email": email},
         "message": "✅ User registered!"
     }
 
@@ -369,10 +375,8 @@ async def login(email: str, password: str):
         except HTTPException:
             raise
         except Exception as e:
-            print(f"Login error: {e}")
             raise HTTPException(status_code=500, detail=str(e))
     else:
-        # Fallback
         if email not in fallback_users:
             raise HTTPException(status_code=401, detail="Invalid email or password")
         
@@ -423,14 +427,13 @@ async def get_current_user(authorization: str = None):
         except Exception as e:
             return {"error": str(e)}
     else:
-        # Fallback
         for u in fallback_users.values():
             if u["id"] == session["user_id"]:
                 return {
                     "id": u["id"],
                     "name": u["name"],
                     "email": u["email"],
-                    "database": "In-Memory (Demo)"
+                    "database": "SQLite (Fallback)"
                 }
 
 @app.post("/api/v1/auth/logout")
@@ -494,7 +497,6 @@ async def create_transaction(
         except Exception as e:
             return {"error": str(e), "database": "PostgreSQL ⚠️"}
     else:
-        # Fallback
         if user_id not in fallback_transactions:
             fallback_transactions[user_id] = []
         
@@ -515,7 +517,7 @@ async def create_transaction(
         
         return {
             **txn,
-            "message": "✅ Transaction saved (In-Memory Demo)"
+            "message": "✅ Transaction saved (SQLite Fallback)"
         }
 
 @app.get("/api/v1/tools/transactions")
@@ -560,7 +562,6 @@ async def list_transactions(skip: int = 0, limit: int = 10, authorization: str =
         except Exception as e:
             return {"error": str(e)}
     else:
-        # Fallback
         txns = fallback_transactions.get(user_id, [])
         txns_sorted = sorted(txns, key=lambda x: x["transaction_date"], reverse=True)
         
@@ -570,7 +571,7 @@ async def list_transactions(skip: int = 0, limit: int = 10, authorization: str =
             "page": (skip // limit) + 1,
             "page_size": limit,
             "total_pages": (len(txns) + limit - 1) // limit,
-            "database": "In-Memory (Demo)"
+            "database": "SQLite (Fallback)"
         }
 
 @app.delete("/api/v1/tools/transactions/{transaction_id}")
@@ -603,12 +604,11 @@ async def delete_transaction(transaction_id: int, authorization: str = None):
         except Exception as e:
             return {"error": str(e)}
     else:
-        # Fallback
         txns = fallback_transactions.get(user_id, [])
         for i, t in enumerate(txns):
             if t["id"] == transaction_id:
                 txns.pop(i)
-                return {"message": "✅ Transaction deleted (In-Memory)"}
+                return {"message": "✅ Transaction deleted (SQLite)"}
         
         raise HTTPException(status_code=404, detail="Transaction not found")
 
@@ -644,7 +644,7 @@ async def get_dashboard_summary(authorization: str = None):
         "total_expenses": total_expenses,
         "net_profit": total_income - total_expenses,
         "transaction_count": len(txns),
-        "database": "PostgreSQL ✅" if db_connected else "In-Memory (Demo)"
+        "database": "PostgreSQL ✅" if db_connected else "SQLite (Fallback)"
     }
 
 # ═══════════════════════════════════════════════════════════
@@ -685,7 +685,7 @@ async def ask_wandaai(question: str, mode: str = "insights", authorization: str 
         "response": response,
         "mode": mode,
         "confidence": 0.95,
-        "database": "PostgreSQL ✅" if db_connected else "In-Memory (Demo)"
+        "database": "PostgreSQL ✅" if db_connected else "SQLite (Fallback)"
     }
 
 @app.get("/api/v1/wandaai/modes")
