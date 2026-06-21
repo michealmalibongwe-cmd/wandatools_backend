@@ -15,16 +15,16 @@ import os
 # DATABASE SETUP
 # ═══════════════════════════════════════════════════════════
 
+from sqlalchemy import create_engine, text
+import os
+
 # Get DATABASE_URL from environment
 DATABASE_URL = os.getenv("DATABASE_URL")
-
 if not DATABASE_URL:
-    print("⚠️  WARNING: DATABASE_URL not set! Using in-memory mode.")
-    DATABASE_URL = "sqlite:///./wandatools.db"  # Fallback to SQLite
+    raise RuntimeError("❌ DATABASE_URL not set! Please configure it in Railway.")
 
 print(f"✅ Connecting to: {DATABASE_URL[:50]}...")
 
-# Create engine with error handling
 try:
     engine = create_engine(
         DATABASE_URL,
@@ -33,19 +33,16 @@ try:
         echo=False
     )
     
-    # Test connection
+    # Test connection safely
     with engine.connect() as conn:
-        conn.execute("SELECT 1")
+        conn.execute(text("SELECT 1"))
     
     print("✅ Database connected successfully!")
     db_connected = True
 except Exception as e:
     print(f"❌ Database connection failed: {e}")
-    print("⚠️  Running in demo mode (data will not persist)")
     db_connected = False
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
 
 # ═══════════════════════════════════════════════════════════
 # DATABASE MODELS
