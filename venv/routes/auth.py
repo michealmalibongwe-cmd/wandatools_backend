@@ -485,3 +485,303 @@ def get_current_user(authorization: str = None):
         raise HTTPException(status_code=401, detail="Invalid token")
     
     return token_data
+
+# ═══════════════════════════════════════════════════════════
+# ADDITIONAL IMPORTS
+# ═══════════════════════════════════════════════════════════
+
+from services.email import EmailService
+from models import EmailVerificationToken, PasswordResetToken, MFAOtp
+import secrets
+from sqlalchemy import and_
+
+# ═══════════════════════════════════════════════════════════
+# EMAIL VERIFICATION
+# ═══════════════════════════════════════════════════════════
+
+def generate_verification_token() -> str:
+    """Generate secure token"""
+    return secrets.token_urlsafe(32)
+
+@router.post("/send-verification-email")
+async def send_verification_email(
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Send verification email"""
+    user = db.query(User).filter(User.id == current_user.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if user.is_verified:
+        raise HTTPException(status_code=400, detail="User already verified")
+    
+    # Generate token
+    token = generate_verification_token()
+    expires_at = datetime.utcnow() + timedelta(hours=24)
+    
+    # Save token
+    verification = EmailVerificationToken(
+        user_id=user.id,
+        token=token,
+        expires_at=expires_at
+    )
+    db.add(verification)
+    db.commit()
+    
+    # Send email
+    email_sent = EmailService.send_verification_email(
+        user.email,
+        token,
+        user.name
+    )
+    
+    if not email_sent:
+        raise HTTPException(status_code=500, detail="Failed to send email")
+    
+    return {
+        "message": "✅ Verification email sent",
+        "expires_in_hours": 24
+    }
+
+@router.post("/verify-email")
+async def verify_email(
+    token: str,
+    db: Session = Depends(get_db)
+):
+    """Verify email with token"""
+    
+    # Find token
+    verification = db.query(EmailVerificationToken).filter(
+        EmailVerificationToken.token == token
+    ).first()
+    
+    if not verification:
+        raise HTTPException(status_code=400, detail="Invalid verification token")
+    
+    # Check expiry
+    if verification.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=400, detail="Verification token expired")
+    
+    # Check if already used
+    if verification.used_at:
+        raise HTTPException(status_code=400, detail="Token already used")
+    
+    # Mark as verified
+    user = verification.user
+    user.is_verified = True
+    user.email_verified_at = datetime.utcnow()
+    
+    verification.used_at = datetime.utcnow()
+    
+    db.commit()
+    
+    return {
+        "message": "✅ Email verified successfully",
+        "user": user.to_dict()
+    }
+
+# ═══════════════════════════════════════════════════════════
+# FORGOT PASSWORD
+# ═══════════════════════════════════════════════════════════
+
+@router.post("/forgot-password")
+async def forgot_password(
+    email: EmailStr,
+    db: Session = Depends(get_db)
+):
+    """Request password reset"""
+    
+    # Find user (don't reveal if exists)
+    user = db.query(User).filter(User.email == email).first()
+    
+    if not user:
+        # Return generic response to prevent email enumeration
+        return {
+            "message": "✅ If email exists, password reset link sent"
+        }
+    
+    # Generate reset token
+    token = generate_verification_token()
+    expires_at = datetime.utcnow() + timedelta(hours=1)
+    
+    # Invalidate previous tokens
+    db.query(PasswordResetToken).filter(
+        and_(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.used_at == None
+        )
+    ).update({"used_at": datetime.utcnow()})
+    
+    # Save new token
+    reset = PasswordResetToken(
+        user_id=user.id,
+        token=token,
+        expires_at=expires_at
+    )
+    db.add(reset)
+    db.commit()
+    
+    # Send email
+    EmailService.send_password_reset_email(
+        user.email,
+        token,
+        user.name
+    )
+    
+    # Generic response
+    return {
+        "message": "✅ If email exists, password reset link sent"
+    }
+
+@router.post("/reset-password")
+async def reset_password(
+    token: str,
+    new_password: str,
+    db: Session = Depends(get_db)
+):
+    """Reset password with token"""
+    
+    # Validate password strength
+    strength = check_password_strength(new_password)
+    if not strength.is_strong:
+        raise HTTPException(
+            status_code=400,
+            detail="Password is too weak"
+        )
+    
+    # Find token
+    reset = db.query(PasswordResetToken).filter(
+        PasswordResetToken.token == token
+    ).first()
+    
+    if not reset:
+        raise HTTPException(status_code=400, detail="Invalid reset token")
+    
+    # Check expiry
+    if reset.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=400, detail="Reset token expired")
+    
+    # Check if already used
+    if reset.used_at:
+        raise HTTPException(status_code=400, detail="Token already used")
+    
+    # Update password
+    user = reset.user
+    user.password_hash = hash_password(new_password)
+    user.failed_login_attempts = 0
+    user.locked_until = None
+    
+    reset.used_at = datetime.utcnow()
+    
+    db.commit()
+    
+    # Log password change
+    log = LoginLog(
+        user_id=user.id,
+        email=user.email,
+        ip_address="system",
+        status=LoginStatus.SUCCESS,
+        reason="Password reset"
+    )
+    db.add(log)
+    db.commit()
+    
+    return {
+        "message": "✅ Password reset successfully"
+    }
+
+# ═══════════════════════════════════════════════════════════
+# MFA WITH EMAIL OTP
+# ═══════════════════════════════════════════════════════════
+
+@router.post("/mfa/send-otp")
+async def send_mfa_otp(
+    email: EmailStr,
+    db: Session = Depends(get_db)
+):
+    """Send MFA OTP to email"""
+    
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if user.mfa_type != "email":
+        raise HTTPException(status_code=400, detail="User not set up for email MFA")
+    
+    # Generate OTP
+    otp = generate_otp()
+    expires_at = datetime.utcnow() + timedelta(minutes=10)
+    
+    # Save OTP
+    mfa_otp = MFAOtp(
+        user_id=user.id,
+        otp=otp,
+        expires_at=expires_at
+    )
+    db.add(mfa_otp)
+    db.commit()
+    
+    # Send email
+    EmailService.send_mfa_otp(user.email, otp, user.name)
+    
+    return {
+        "message": "✅ OTP sent to email",
+        "expires_in_minutes": 10
+    }
+
+@router.post("/mfa/verify-otp")
+async def verify_mfa_otp(
+    email: EmailStr,
+    otp: str,
+    db: Session = Depends(get_db)
+):
+    """Verify MFA OTP"""
+    
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Find recent OTP
+    mfa_otp = db.query(MFAOtp).filter(
+        and_(
+            MFAOtp.user_id == user.id,
+            MFAOtp.verified_at == None,
+            MFAOtp.expires_at > datetime.utcnow()
+        )
+    ).order_by(MFAOtp.created_at.desc()).first()
+    
+    if not mfa_otp:
+        raise HTTPException(status_code=400, detail="No valid OTP found")
+    
+    # Check attempts
+    if mfa_otp.attempts >= 3:
+        raise HTTPException(status_code=429, detail="Too many failed attempts")
+    
+    # Verify OTP
+    if mfa_otp.otp != otp:
+        mfa_otp.attempts += 1
+        db.commit()
+        raise HTTPException(status_code=401, detail="Invalid OTP")
+    
+    # Mark as verified
+    mfa_otp.verified_at = datetime.utcnow()
+    
+    # Reset failed login attempts
+    user.failed_login_attempts = 0
+    user.locked_until = None
+    user.last_login = datetime.utcnow()
+    
+    db.commit()
+    
+    # Create tokens
+    access_token = create_access_token(user.id, user.email)
+    refresh_token = create_refresh_token(user.id, user.email)
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        "message": "✅ MFA verified successfully"
+    }
