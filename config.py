@@ -40,13 +40,13 @@ class Settings(BaseSettings):
     ACCOUNT_LOCKOUT_MINUTES: int = 30
     
     # CORS
-    CORS_ORIGINS: list = [
-        "http://localhost:3000",
-        "http://localhost:8000",
-        "https://wandatools.com",
-        "https://www.wandatools.com",
-        "*"
-    ]
+    CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:8000",
+    "https://wandatools.vercel.app",  # ✅ Your Vercel domain
+    "https://*.vercel.app"
+]
+
     CORS_ALLOW_CREDENTIALS: bool = True
     CORS_ALLOW_METHODS: list = ["*"]
     CORS_ALLOW_HEADERS: list = ["*"]
