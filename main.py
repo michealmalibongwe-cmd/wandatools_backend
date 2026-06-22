@@ -25,6 +25,8 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 
+
+
 # ─────────────────────────────────────────────────────────────
 # LOGGING  — shows clear messages in Railway logs
 # ─────────────────────────────────────────────────────────────
@@ -351,6 +353,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ─────────────────────────────────────────────────────────────
+# ROUTERS
+# ─────────────────────────────────────────────────────────────
+from routes.auth          import router as auth_router
+from routes.wandaai       import router as wandaai_router
+from routes.tools         import router as tools_router
+from routes.support       import router as support_router
+from routes.transactions  import router as transactions_router
+from routes.users         import router as users_router
+from routes.documents     import router as documents_router
+
+app.include_router(auth_router)
+app.include_router(wandaai_router)
+app.include_router(tools_router)
+app.include_router(support_router)
+app.include_router(transactions_router)
+app.include_router(users_router)
+app.include_router(documents_router)
 
 
 # ─────────────────────────────────────────────────────────────
