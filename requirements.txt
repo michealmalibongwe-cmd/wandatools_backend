@@ -13,3 +13,5 @@ requests==2.31.0
 slowapi==0.1.9
 pyotp==2.9.0
 qrcode==7.4.2
+passlib[bcrypt]
+python-jose[cryptography]
