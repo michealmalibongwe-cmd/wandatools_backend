@@ -19,7 +19,7 @@ Endpoints:
 import logging
 import re
 from datetime import datetime, timedelta
-
+from services.email import EmailService
 from fastapi import APIRouter, Depends, HTTPException, Header, status
 from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy.orm import Session
@@ -264,6 +264,7 @@ async def register(body: RegisterRequest, db: Session = Depends(get_db)):
 
         response = _build_token_response(user, db)
         db.commit()
+        
 
         log.info(f"✅ New user registered: {user.id} ({user.email})")
         return {**response, "message": "✅ Account created successfully!"}

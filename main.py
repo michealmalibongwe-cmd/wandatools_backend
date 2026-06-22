@@ -366,6 +366,7 @@ from routes.transactions  import router as transactions_router
 from routes.users         import router as users_router
 from routes.documents     import router as documents_router
 
+
 app.include_router(auth_router)
 app.include_router(wandaai_router)
 app.include_router(tools_router)
