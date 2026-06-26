@@ -1,29 +1,36 @@
 """
-WandaTools — email.py
+WandaTools — services/email.py
+Location: services/ folder (services/email.py)
+
 SMTP email service — all transactional emails sent by WandaTools.
 
-IMPORTANT — source of truth:
-  The low-level send_email(), _contact_email_html(), and _contact_confirm_html()
-  functions are defined in main.py and RE-EXPORTED here.
-  EmailService wraps them and adds higher-level methods:
-    - send_verification_email()   — account email verification link
-    - send_password_reset_email() — password reset link
-    - send_mfa_otp()              — 6-digit OTP for MFA login
-    - send_welcome_email()        — welcome message after registration
+Source of truth:
+  Low-level send_email(), _contact_email_html(), _contact_confirm_html()
+  are defined in main.py and RE-EXPORTED here.
+  EmailService adds higher-level methods on top.
+
+Methods:
+  send_email()                  — low-level passthrough (any email)
+  send_verification_email()     — account email verification link
+  send_password_reset_email()   — password reset link
+  send_mfa_otp()                — 6-digit OTP for MFA login
+  send_welcome_email()          — welcome message after registration
+  send_contact_notification()   — notify support team of contact form
+  send_contact_confirmation()   — confirm receipt to the submitting user
 
 Railway env vars required:
-    SMTP_HOST        (default: smtp.gmail.com)
-    SMTP_PORT        (default: 587)
-    SMTP_USER        your sending email address
-    SMTP_PASSWORD    Gmail App Password or SMTP password
-    SUPPORT_EMAIL    email that receives contact form submissions
-    FRONTEND_URL     base URL for links in emails (e.g. https://wandatools.vercel.app)
+  SMTP_HOST      (default: smtp.gmail.com)
+  SMTP_PORT      (default: 587)
+  SMTP_USER      your sending email address
+  SMTP_PASSWORD  Gmail App Password or SMTP password
+  SUPPORT_EMAIL  email that receives contact form submissions
+  FRONTEND_URL   base URL for links (e.g. https://wandatools.vercel.app)
 """
 
 import logging
+import os
 from datetime import datetime
 
-# Re-export low-level functions from main.py — no duplication
 from main import (
     send_email,
     _contact_email_html,
@@ -35,29 +42,24 @@ from main import (
     SUPPORT_EMAIL,
 )
 
-from config import get_settings
+log = logging.getLogger("wandatools.email")
 
-settings = get_settings()
-log      = logging.getLogger("wandatools.email")
+# Frontend URL for building links in emails
+FRONTEND_URL   = os.getenv("FRONTEND_URL", "https://wandatools.vercel.app")
 
-# Frontend base URL — used to build links in emails
-FRONTEND_URL = settings.__dict__.get("FRONTEND_URL", "https://wandatools.vercel.app")
-
-# Brand colours used across all email templates
+# Brand colours
 _BRAND_PRIMARY = "#007BFF"
 _BRAND_SUCCESS = "#28A745"
 _BRAND_WARNING = "#FFC107"
 _BRAND_DANGER  = "#DC3545"
 
+
 # ─────────────────────────────────────────────────────────────
-# SHARED EMAIL WRAPPER
+# SHARED TEMPLATE HELPERS
 # ─────────────────────────────────────────────────────────────
 
 def _base_template(title: str, body_html: str, accent: str = _BRAND_PRIMARY) -> str:
-    """
-    Consistent branded HTML wrapper used by every email template.
-    Keeps all emails looking identical without repeating boilerplate.
-    """
+    """Consistent branded HTML wrapper for every email."""
     year = datetime.utcnow().year
     return f"""
     <!DOCTYPE html>
@@ -73,8 +75,6 @@ def _base_template(title: str, body_html: str, accent: str = _BRAND_PRIMARY) -> 
           <table width="600" cellpadding="0" cellspacing="0"
                  style="background:#ffffff;border-radius:12px;overflow:hidden;
                         box-shadow:0 2px 8px rgba(0,0,0,.08);max-width:600px;width:100%;">
-
-            <!-- Header -->
             <tr>
               <td style="background:linear-gradient(135deg,{accent} 0%,#28A745 100%);
                          padding:32px 40px;text-align:center;">
@@ -86,15 +86,7 @@ def _base_template(title: str, body_html: str, accent: str = _BRAND_PRIMARY) -> 
                 </p>
               </td>
             </tr>
-
-            <!-- Body -->
-            <tr>
-              <td style="padding:40px;">
-                {body_html}
-              </td>
-            </tr>
-
-            <!-- Footer -->
+            <tr><td style="padding:40px;">{body_html}</td></tr>
             <tr>
               <td style="background:#f9f9f9;padding:20px 40px;border-top:1px solid #eee;
                          text-align:center;">
@@ -106,7 +98,6 @@ def _base_template(title: str, body_html: str, accent: str = _BRAND_PRIMARY) -> 
                 </p>
               </td>
             </tr>
-
           </table>
         </td></tr>
       </table>
@@ -116,25 +107,25 @@ def _base_template(title: str, body_html: str, accent: str = _BRAND_PRIMARY) -> 
 
 
 def _cta_button(text: str, url: str, color: str = _BRAND_PRIMARY) -> str:
-    """Reusable CTA button block for email templates."""
+    """Reusable CTA button block."""
     return f"""
     <div style="text-align:center;margin:32px 0;">
       <a href="{url}"
          style="display:inline-block;background:{color};color:#fff;
                 padding:14px 36px;border-radius:8px;text-decoration:none;
-                font-weight:bold;font-size:16px;letter-spacing:.3px;">
+                font-weight:bold;font-size:16px;">
         {text}
       </a>
     </div>
     <p style="text-align:center;color:#888;font-size:12px;margin-top:-16px;">
-      Or copy this link: <br>
+      Or copy this link:<br>
       <a href="{url}" style="color:{color};word-break:break-all;font-size:11px;">{url}</a>
     </p>
     """
 
 
 def _warning_box(text: str, color: str = _BRAND_WARNING) -> str:
-    """Reusable warning/info box block for email templates."""
+    """Reusable warning/info box."""
     return f"""
     <div style="background:#fff8e1;border-left:4px solid {color};
                 padding:14px 18px;border-radius:4px;margin:24px 0;">
@@ -144,7 +135,7 @@ def _warning_box(text: str, color: str = _BRAND_WARNING) -> str:
 
 
 # ─────────────────────────────────────────────────────────────
-# EMAIL SERVICE CLASS
+# EMAIL SERVICE
 # ─────────────────────────────────────────────────────────────
 
 class EmailService:
@@ -153,109 +144,67 @@ class EmailService:
     All methods are static — no instantiation needed.
 
     Usage:
-        from email import EmailService
-        EmailService.send_verification_email(email, token, name)
+        from services.email import EmailService
+        EmailService.send_welcome_email(email, name, currency)
     """
 
-    # ── Low-level passthrough (for backwards compatibility) ───
     @staticmethod
     def send_email(to_email: str, subject: str, html_content: str) -> bool:
-        """
-        Send any email. Thin wrapper around main.py's send_email().
-        Use the specific methods below for transactional emails.
-        """
+        """Low-level passthrough — send any email via main.py's send_email()."""
         return send_email(to=to_email, subject=subject, html_body=html_content)
 
-    # ── Email Verification ────────────────────────────────────
     @staticmethod
     def send_verification_email(email: str, token: str, name: str) -> bool:
-        """
-        Send an email verification link to a newly registered user.
-
-        Args:
-            email: User's email address
-            token: A secure token generated at registration (store in DB with expiry)
-            name:  User's display name
-        """
+        """Send account email verification link after registration."""
         url  = f"{FRONTEND_URL}/verify-email?token={token}"
         body = f"""
         <h2 style="color:#333;margin-top:0;">Welcome to WandaTools, {name}! 👋</h2>
         <p style="color:#555;line-height:1.7;">
-          Thank you for signing up. Please verify your email address to activate your
-          account and start managing your finances with AI-powered insights.
+          Please verify your email address to activate your account.
         </p>
         {_cta_button("✅ Verify My Email", url, _BRAND_SUCCESS)}
         {_warning_box("⏰ This link expires in <strong>24 hours</strong>. "
-                      "If you didn't create a WandaTools account, you can safely ignore this email.")}
+                      "If you didn't create a WandaTools account, ignore this email.")}
         """
         html = _base_template(f"Verify your WandaTools email — {name}", body, _BRAND_SUCCESS)
-        sent = send_email(
-            to=email,
-            subject="✅ Verify your WandaTools email address",
-            html_body=html,
-        )
+        sent = send_email(to=email, subject="✅ Verify your WandaTools email address", html_body=html)
         if sent:
             log.info(f"📧 Verification email sent to {email}")
         else:
             log.warning(f"⚠️  Verification email failed for {email}")
         return sent
 
-    # ── Password Reset ─────────────────────────────────────────
     @staticmethod
     def send_password_reset_email(email: str, token: str, name: str) -> bool:
-        """
-        Send a password reset link.
-
-        Args:
-            email: User's email address
-            token: A short-lived reset token (store in DB, expires in 1 hour)
-            name:  User's display name
-        """
+        """Send a password reset link. Token expires in 1 hour."""
         url  = f"{FRONTEND_URL}/reset-password?token={token}"
         body = f"""
         <h2 style="color:#333;margin-top:0;">Password Reset Request</h2>
         <p style="color:#555;line-height:1.7;">Hi <strong>{name}</strong>,</p>
         <p style="color:#555;line-height:1.7;">
-          We received a request to reset your WandaTools password.
-          Click the button below to choose a new one.
+          Click the button below to reset your WandaTools password.
         </p>
         {_cta_button("🔑 Reset My Password", url, _BRAND_PRIMARY)}
         {_warning_box(
             "⚠️ <strong>Security notice:</strong> This link expires in <strong>1 hour</strong>. "
-            "If you did not request a password reset, please ignore this email — "
-            "your password has not been changed.",
+            "If you did not request this, ignore this email.",
             _BRAND_DANGER
         )}
         """
-        html = _base_template(f"Reset your WandaTools password", body, _BRAND_DANGER)
-        sent = send_email(
-            to=email,
-            subject="🔑 Reset your WandaTools password",
-            html_body=html,
-        )
+        html = _base_template("Reset your WandaTools password", body, _BRAND_DANGER)
+        sent = send_email(to=email, subject="🔑 Reset your WandaTools password", html_body=html)
         if sent:
             log.info(f"📧 Password reset email sent to {email}")
         else:
             log.warning(f"⚠️  Password reset email failed for {email}")
         return sent
 
-    # ── MFA OTP ───────────────────────────────────────────────
     @staticmethod
     def send_mfa_otp(email: str, otp: str, name: str) -> bool:
-        """
-        Send a 6-digit OTP for email-based MFA login verification.
-
-        Args:
-            email: User's email address
-            otp:   6-digit code from security.generate_otp()
-            name:  User's display name
-        """
+        """Send a 6-digit OTP for email-based MFA. Expires in 10 minutes."""
         body = f"""
         <h2 style="color:#333;margin-top:0;">Your WandaTools Login Code</h2>
         <p style="color:#555;line-height:1.7;">Hi <strong>{name}</strong>,</p>
-        <p style="color:#555;line-height:1.7;">
-          Use this one-time code to complete your login:
-        </p>
         <div style="background:#f0f4ff;border:2px solid {_BRAND_PRIMARY};border-radius:12px;
                     padding:24px;text-align:center;margin:24px 0;">
           <p style="font-size:48px;font-weight:bold;color:{_BRAND_PRIMARY};
@@ -268,45 +217,30 @@ class EmailService:
         </p>
         {_warning_box(
             "🔒 <strong>Never share this code</strong> with anyone. "
-            "WandaTools staff will never ask for your OTP code.",
+            "WandaTools staff will never ask for your OTP.",
             _BRAND_WARNING
         )}
         """
         html = _base_template("Your WandaTools Login Code", body, _BRAND_PRIMARY)
-        sent = send_email(
-            to=email,
-            subject=f"🔐 Your WandaTools code: {otp}",
-            html_body=html,
-        )
+        sent = send_email(to=email, subject=f"🔐 Your WandaTools code: {otp}", html_body=html)
         if sent:
             log.info(f"📧 MFA OTP sent to {email}")
         else:
             log.warning(f"⚠️  MFA OTP email failed for {email}")
         return sent
 
-    # ── Welcome Email ─────────────────────────────────────────
     @staticmethod
     def send_welcome_email(email: str, name: str, currency: str = "E") -> bool:
-        """
-        Send a welcome email after successful registration.
-        Introduces the user to WandaTools features.
-
-        Args:
-            email:    User's email address
-            name:     User's display name
-            currency: User's chosen currency symbol (default E for Emalangeni)
-        """
+        """Send welcome email after successful registration."""
         dashboard_url = f"{FRONTEND_URL}/dashboard"
         body = f"""
         <h2 style="color:#333;margin-top:0;">You're in! Welcome to WandaTools 🎉</h2>
         <p style="color:#555;line-height:1.7;">Hi <strong>{name}</strong>,</p>
-        <p style="color:#555;line-height:1.7;">
-          Your account is ready. Here's what you can do right now:
-        </p>
+        <p style="color:#555;line-height:1.7;">Your account is ready. Here's what you can do:</p>
         <table width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0;">
           <tr>
-            <td style="padding:10px;background:#f0fdf4;border-radius:8px;margin-bottom:8px;
-                       border-left:4px solid {_BRAND_SUCCESS};display:block;">
+            <td style="padding:10px;background:#f0fdf4;border-radius:8px;
+                       border-left:4px solid {_BRAND_SUCCESS};">
               💰 <strong>Log transactions</strong> — track income &amp; expenses in {currency}
             </td>
           </tr>
@@ -327,29 +261,23 @@ class EmailService:
         </table>
         {_cta_button("🚀 Go to my Dashboard", dashboard_url, _BRAND_SUCCESS)}
         <p style="color:#888;font-size:12px;text-align:center;">
-          Questions? Email us at
+          Questions? Email
           <a href="mailto:admin@wandatools.com" style="color:{_BRAND_PRIMARY};">
             admin@wandatools.com
           </a>
         </p>
         """
         html = _base_template(f"Welcome to WandaTools, {name}!", body, _BRAND_SUCCESS)
-        sent = send_email(
-            to=email,
-            subject=f"🎉 Welcome to WandaTools, {name}!",
-            html_body=html,
-        )
+        sent = send_email(to=email, subject=f"🎉 Welcome to WandaTools, {name}!", html_body=html)
         if sent:
             log.info(f"📧 Welcome email sent to {email}")
         else:
             log.warning(f"⚠️  Welcome email failed for {email}")
         return sent
 
-    # ── Contact Form (re-export for backwards compatibility) ───
     @staticmethod
-    def send_contact_notification(
-        name: str, sender_email: str, subject: str, message: str, msg_id: int
-    ) -> bool:
+    def send_contact_notification(name: str, sender_email: str,
+                                   subject: str, message: str, msg_id: int) -> bool:
         """Send contact form notification to support team."""
         return send_email(
             to=SUPPORT_EMAIL,

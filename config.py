@@ -1,100 +1,150 @@
 """
-WandaTools Unified Backend Configuration
-Security, environment, and application settings
+WandaTools — config.py
+Location: ROOT folder (same level as main.py)
+
+Centralised settings using pydantic-settings.
+All values read from environment variables.
+Defaults are safe for local development — override on Railway.
+
+Usage anywhere in the project:
+    from config import get_settings
+    settings = get_settings()
+    print(settings.DATABASE_URL)
+
+Railway env vars to set:
+  DATABASE_URL            PostgreSQL connection string (auto-injected by Railway)
+  JWT_SECRET              Random hex string — openssl rand -hex 32
+  JWT_REFRESH_SECRET      Different random hex — openssl rand -hex 32
+  ACCESS_TOKEN_MINUTES    Default: 30
+  REFRESH_TOKEN_DAYS      Default: 7
+  SMTP_HOST               Default: smtp.gmail.com
+  SMTP_PORT               Default: 587
+  SMTP_USER               Your sending email address
+  SMTP_PASSWORD           Gmail App Password
+  SUPPORT_EMAIL           Email that receives contact form submissions
+  FRONTEND_URL            https://wandatools.vercel.app
+  ALLOWED_ORIGINS         Comma-separated list of allowed CORS origins
+  ENVIRONMENT             production | development | testing
+  DEBUG                   true | false (enables SQL query logging)
+  PORT                    Default: 8000 (Railway sets this automatically)
+  TOTP_ISSUER             Default: WandaTools (shown in authenticator apps)
+  PASSWORD_REQUIRE_NUMBERS  true | false — Default: true
+  PASSWORD_REQUIRE_SPECIAL  true | false — Default: true
 """
 
-import os
-from datetime import timedelta
-from pydantic_settings import BaseSettings
+import secrets
 from functools import lru_cache
+from typing import Optional
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # Database
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://user:password@localhost/wandatools_db")
-    
-    # Security
-    SECRET_KEY: str = os.getenv(
-        "SECRET_KEY",
-        "dev-secret-key-change-in-production-min-32-chars-required!!"
-    )
-    ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours default
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
-    
-    # JWT
-    JWT_SECRET_KEY: str = SECRET_KEY
-    JWT_ALGORITHM: str = ALGORITHM
-    
-    # Password policy
-    PASSWORD_MIN_LENGTH: int = 12
-    PASSWORD_REQUIRE_SPECIAL: bool = True
-    PASSWORD_REQUIRE_NUMBERS: bool = True
-    PASSWORD_REQUIRE_UPPERCASE: bool = True
-    
-    # Rate Limiting
-    RATE_LIMIT_REQUESTS: int = 100
-    RATE_LIMIT_PERIOD: int = 60
-    RATE_LIMIT_LOGIN_ATTEMPTS: int = 5
-    RATE_LIMIT_WINDOW_SECONDS: int = 300  # 5 minutes
-    ACCOUNT_LOCKOUT_MINUTES: int = 30
-    
-    # CORS
-    CORS_ORIGINS = [
-    "http://localhost:3000",
-    "http://localhost:8000",
-    "https://wandatools.vercel.app",  # ✅ Your Vercel domain
-    "https://*.vercel.app"
-]
+    """
+    All WandaTools configuration in one place.
+    Values are read from environment variables automatically.
+    Field names match the env var names exactly (case-insensitive).
+    """
 
-    CORS_ALLOW_CREDENTIALS: bool = True
-    CORS_ALLOW_METHODS: list = ["*"]
-    CORS_ALLOW_HEADERS: list = ["*"]
-    
-    # Email
-    SMTP_SERVER: str = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-    SMTP_PORT: int = 587
-    SMTP_USER: str = os.getenv("SMTP_USER", "your-email@gmail.com")
-    SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "your-app-password")
-    SUPPORT_EMAIL: str = "support@wandatools.com"
-    
-    # MFA
-    MFA_ENABLED: bool = True
-    TOTP_ISSUER: str = "WandaTools"
-    
-    # Environment
-    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
-    DEBUG: bool = ENVIRONMENT == "development"
-    
-    # App metadata
-    APP_NAME: str = "WandaTools API"
-    APP_VERSION: str = "1.0.0"
-    API_PREFIX: str = "/api/v1"
-    
-    # File storage
-    UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "./uploads")
-    MAX_FILE_SIZE: int = 10 * 1024 * 1024  # 10 MB
-    
-    # AI
-    AI_API_KEY: str = os.getenv("AI_API_KEY", "")
-    AI_API_URL: str = "https://api.openai.com/v1"
-    
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    model_config = SettingsConfigDict(
+        env_file=".env",               # load from .env file in local dev
+        env_file_encoding="utf-8",
+        case_sensitive=False,          # DATABASE_URL == database_url
+        extra="ignore",                # ignore unknown env vars
+    )
+
+    # ─────────────────────────────────────────────────────────
+    # DATABASE
+    # ─────────────────────────────────────────────────────────
+
+    DATABASE_URL: str = ""   # required — set DATABASE_URL on Railway
+
+    # ─────────────────────────────────────────────────────────
+    # JWT / AUTH
+    # ─────────────────────────────────────────────────────────
+
+    JWT_SECRET:           str = ""   # required — set on Railway
+    JWT_REFRESH_SECRET:   str = ""   # required — set on Railway
+    JWT_ALGORITHM:        str = "HS256"
+    ACCESS_TOKEN_MINUTES: int = 30
+    REFRESH_TOKEN_DAYS:   int = 7
+
+    # ─────────────────────────────────────────────────────────
+    # SMTP EMAIL
+    # ─────────────────────────────────────────────────────────
+
+    SMTP_HOST:     str = "smtp.gmail.com"
+    SMTP_PORT:     int = 587
+    SMTP_USER:     str = ""                             # set on Railway
+    SMTP_PASSWORD: str = ""                             # set on Railway
+    SUPPORT_EMAIL: str = "admin@wandatools.com"
+
+    # ─────────────────────────────────────────────────────────
+    # FRONTEND + CORS
+    # ─────────────────────────────────────────────────────────
+
+    FRONTEND_URL:    str = "https://wandatools.vercel.app"
+    ALLOWED_ORIGINS: str = (
+        "https://wandatools.vercel.app,"
+        "http://localhost:3000,"
+        "http://localhost:5500"
+    )
+
+    @property
+    def allowed_origins_list(self) -> list[str]:
+        """Return ALLOWED_ORIGINS as a Python list for FastAPI middleware."""
+        return [o.strip() for o in self.ALLOWED_ORIGINS.split(",") if o.strip()]
+
+    # ─────────────────────────────────────────────────────────
+    # ENVIRONMENT + DEBUGGING
+    # ─────────────────────────────────────────────────────────
+
+    ENVIRONMENT: str  = "production"    # production | development | testing
+    DEBUG:       bool = False           # enables SQL query logging when True
+    PORT:        int  = 8000
+
+    @property
+    def is_testing(self) -> bool:
+        return self.ENVIRONMENT.lower() == "testing"
+
+    @property
+    def is_development(self) -> bool:
+        return self.ENVIRONMENT.lower() == "development"
+
+    @property
+    def is_production(self) -> bool:
+        return self.ENVIRONMENT.lower() == "production"
+
+    # ─────────────────────────────────────────────────────────
+    # SECURITY POLICY
+    # ─────────────────────────────────────────────────────────
+
+    PASSWORD_REQUIRE_NUMBERS: bool = True
+    PASSWORD_REQUIRE_SPECIAL: bool = True
+    TOTP_ISSUER:              str  = "WandaTools"
+
+    # ─────────────────────────────────────────────────────────
+    # CURRENCY
+    # ─────────────────────────────────────────────────────────
+
+    DEFAULT_CURRENCY:     str  = "E"    # Emalangeni — Eswatini
+    SUPPORTED_CURRENCIES: str  = "E,ZAR,USD,GBP,EUR"
+
+    @property
+    def supported_currencies_set(self) -> set[str]:
+        """Return SUPPORTED_CURRENCIES as a Python set."""
+        return {c.strip().upper() for c in self.SUPPORTED_CURRENCIES.split(",") if c.strip()}
 
 
 @lru_cache()
-def get_settings():
+def get_settings() -> Settings:
+    """
+    Return the cached Settings singleton.
+    @lru_cache ensures settings are only loaded once per process.
+
+    Usage:
+        from config import get_settings
+        settings = get_settings()
+        print(settings.DATABASE_URL)
+    """
     return Settings()
-
-
-# Security constants
-PASSWORD_MIN_LENGTH = 8  # baseline
-PASSWORD_REQUIRE_NUMBERS = True
-PASSWORD_REQUIRE_SPECIAL = True
-
-# Token expiration
-settings = get_settings()
-ACCESS_TOKEN_EXPIRE = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-REFRESH_TOKEN_EXPIRE = timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)

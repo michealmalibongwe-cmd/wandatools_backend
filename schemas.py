@@ -37,21 +37,17 @@ class UserUpdate(BaseModel):
 
 
 class UserResponse(UserBase):
-    """User response schema"""
+    """User response schema — mirrors the User ORM model exactly."""
     id: int
-    is_active: bool
-    is_verified: bool
     created_at: datetime
-    last_login: Optional[datetime] = None
-    
+
     class Config:
         from_attributes = True
 
 
 class UserDetailResponse(UserResponse):
-    """Detailed user response with related data"""
-    updated_at: datetime
-    role: str
+    """Detailed user response with currency info."""
+    currency: str
 
 
 # ═══ Authentication Schemas ═══
@@ -71,7 +67,7 @@ class TokenRefresh(BaseModel):
 # ═══ Transaction Schemas ═══
 class TransactionBase(BaseModel):
     """Base transaction schema"""
-    type: str = Field(..., pattern="^(income|expense|transfer)$")
+    type: str = Field(..., pattern="^(income|expense)$")
     amount: float = Field(..., gt=0)
     category: str
     description: str = Field(..., min_length=1, max_length=500)
@@ -83,8 +79,8 @@ class TransactionCreate(TransactionBase):
     reference_id: Optional[str] = None
     recipient_or_payer: Optional[str] = None
     notes: Optional[str] = None
-    is_recurring: Optional[str] = None
-    tax_deductible: Optional[str] = None
+    is_recurring: Optional[bool] = None
+    tax_deductible: Optional[bool] = None
 
 
 class TransactionUpdate(BaseModel):
@@ -105,9 +101,9 @@ class TransactionResponse(TransactionBase):
     reference_id: Optional[str] = None
     recipient_or_payer: Optional[str] = None
     notes: Optional[str] = None
-    is_recurring: Optional[str] = None
-    tax_deductible: Optional[str] = None
-    
+    is_recurring: Optional[bool] = None
+    tax_deductible: Optional[bool] = None
+
     class Config:
         from_attributes = True
 

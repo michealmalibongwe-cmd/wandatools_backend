@@ -1,20 +1,17 @@
 """
 WandaTools — routes/support.py
+Location: routes/ folder
+
 Support, FAQ, feedback and system health endpoints.
 
-Note on Notification model:
-  The original support.py referenced a Notification model — this does
-  not exist in main.py yet. All notification references are removed.
-  Ticket and notification features are stubbed until the model is added.
-
 Endpoints:
-  POST  /api/v1/support/contact    — submit contact form (saves to DB + sends email)
-  GET   /api/v1/support/faq        — get FAQ items (filterable by search/category)
+  POST  /api/v1/support/contact    — submit contact form
+  GET   /api/v1/support/faq        — get FAQ items
   GET   /api/v1/support/status     — support hours and contact info
   GET   /api/v1/support/health     — system/DB health check
-  GET   /api/v1/support/tickets    — list support tickets (stub, auth required)
-  POST  /api/v1/support/tickets    — create support ticket (stub, auth required)
-  POST  /api/v1/support/feedback   — submit feedback (auth required)
+  GET   /api/v1/support/tickets    — list support tickets (stub)
+  POST  /api/v1/support/tickets    — create support ticket (stub)
+  POST  /api/v1/support/feedback   — submit feedback
 """
 
 import logging
@@ -24,26 +21,24 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from services.email import EmailService
 
 from db import get_db
 from main import (
     ContactMessage,
+    User,
     send_email,
     _contact_email_html,
     _contact_confirm_html,
     SUPPORT_EMAIL,
 )
 from routes.auth import get_current_user
-from main import User
 
-log = logging.getLogger("wandatools.support")
-
+log    = logging.getLogger("wandatools.support")
 router = APIRouter(prefix="/api/v1/support", tags=["Support"])
 
 
 # ─────────────────────────────────────────────────────────────
-# PYDANTIC SCHEMAS
+# SCHEMAS
 # ─────────────────────────────────────────────────────────────
 
 class ContactRequest(BaseModel):
@@ -71,7 +66,7 @@ class ContactRequest(BaseModel):
 
 class FeedbackRequest(BaseModel):
     feedback_text: str
-    category:      str = "general"
+    category:      str        = "general"
     rating:        int | None = None
 
     @field_validator("feedback_text")
@@ -125,93 +120,29 @@ class TicketRequest(BaseModel):
 # ─────────────────────────────────────────────────────────────
 
 _FAQ_ITEMS = [
-    {
-        "id": 1,
-        "category": "security",
-        "question": "Is my financial data secure?",
-        "answer": (
-            "Yes. WandaTools uses bcrypt password hashing and bank-level encryption "
-            "to protect all your data. We comply with POPIA and never share your "
-            "information with third parties."
-        ),
-    },
-    {
-        "id": 2,
-        "category": "billing",
-        "question": "How much does WandaTools cost?",
-        "answer": (
-            "WandaTools is free to start. You get access to Transactions, Dashboard, "
-            "Documents, and WandaAI at no cost. Premium features are coming soon."
-        ),
-    },
-    {
-        "id": 3,
-        "category": "technical",
-        "question": "Can I export my data?",
-        "answer": (
-            "Yes. You can export your transaction history as CSV and generate "
-            "professional PDF reports (Audit, Loan, Investment) at any time."
-        ),
-    },
-    {
-        "id": 4,
-        "category": "security",
-        "question": "Is WandaAI trained on my personal data?",
-        "answer": (
-            "No. WandaAI uses your data only to give you personalised insights. "
-            "We do not use your financial information to train our AI models."
-        ),
-    },
-    {
-        "id": 5,
-        "category": "technical",
-        "question": "What currency does WandaTools use?",
-        "answer": (
-            "The default currency is Emalangeni (E) for Eswatini. You can set your "
-            "preferred currency (E, ZAR, USD, GBP, EUR) when registering or per transaction."
-        ),
-    },
-    {
-        "id": 6,
-        "category": "general",
-        "question": "How do I delete my account?",
-        "answer": (
-            "You can delete your account from your profile settings using the "
-            "DELETE /api/v1/auth/account endpoint. All data is permanently removed immediately."
-        ),
-    },
-    {
-        "id": 7,
-        "category": "security",
-        "question": "How long does my login session last?",
-        "answer": (
-            "Your access token lasts 30 minutes. Your device automatically refreshes it "
-            "using a 7-day refresh token — so you stay logged in without re-entering your password."
-        ),
-    },
-    {
-        "id": 8,
-        "category": "technical",
-        "question": "Can I integrate WandaTools with my accounting software?",
-        "answer": (
-            "We are building integrations with popular accounting tools. For now, "
-            "you can export CSV files and import into QuickBooks, Xero, or Pastel."
-        ),
-    },
-    {
-        "id": 9,
-        "category": "general",
-        "question": "Can I use WandaTools for my non-profit?",
-        "answer": (
-            "Yes! Email admin@wandatools.com with your registration details "
-            "to discuss discounted options for registered NGOs and non-profits."
-        ),
-    },
+    {"id": 1, "category": "security",  "question": "Is my financial data secure?",
+     "answer": "Yes. Passwords are bcrypt-hashed and data is encrypted at rest on Railway PostgreSQL. We comply with POPIA and never share your data with third parties."},
+    {"id": 2, "category": "billing",   "question": "How much does WandaTools cost?",
+     "answer": "WandaTools is free to start. Transactions, Dashboard, Documents, and WandaAI are included at no cost. Premium features are coming soon."},
+    {"id": 3, "category": "technical", "question": "Can I export my data?",
+     "answer": "Yes. Export transaction history as CSV and generate professional PDF reports (Audit, Loan, Investment) at any time."},
+    {"id": 4, "category": "security",  "question": "Is WandaAI trained on my personal data?",
+     "answer": "No. WandaAI uses your data only to give you personalised insights. We do not train our AI on your financial information."},
+    {"id": 5, "category": "technical", "question": "What currency does WandaTools use?",
+     "answer": "Default is Emalangeni (E) for Eswatini. You can set your preferred currency (E, ZAR, USD, GBP, EUR) during registration or per transaction."},
+    {"id": 6, "category": "general",   "question": "How do I delete my account?",
+     "answer": "Delete your account from profile settings. All data is permanently removed immediately."},
+    {"id": 7, "category": "security",  "question": "How long does my login session last?",
+     "answer": "Your access token lasts 30 minutes. Your device refreshes it automatically using a 7-day refresh token — you stay logged in without re-entering your password."},
+    {"id": 8, "category": "technical", "question": "Can I integrate with accounting software?",
+     "answer": "We are building integrations with popular tools. For now, export CSV files and import into QuickBooks, Xero, or Pastel."},
+    {"id": 9, "category": "general",   "question": "Can I use WandaTools for my non-profit?",
+     "answer": "Yes! Email admin@wandatools.com with your registration details to discuss discounted options for registered NGOs and non-profits."},
 ]
 
 
 # ─────────────────────────────────────────────────────────────
-# CONTACT FORM
+# ENDPOINTS
 # ─────────────────────────────────────────────────────────────
 
 @router.post("/contact", status_code=status.HTTP_201_CREATED)
@@ -220,10 +151,8 @@ async def submit_contact(
     db:   Session = Depends(get_db),
 ):
     """
-    Submit a support contact form.
-    No authentication required — anyone can reach support.
-    Saves the message to the contact_messages table.
-    Sends an email to the support team and a confirmation to the user.
+    Submit a support contact form. No authentication required.
+    Saves message to DB and sends email to support team and confirmation to user.
     """
     db_entry = ContactMessage(
         name=body.name,
@@ -245,46 +174,30 @@ async def submit_contact(
             detail=f"Could not save your message — please try again: {exc}",
         )
 
-    # Email support team
-    team_sent = send_email(
+    send_email(
         to=SUPPORT_EMAIL,
         subject=f"[WandaTools Support #{msg_id}] {body.subject}",
         html_body=_contact_email_html(body.name, str(body.email), body.subject, body.message),
     )
-
-    # Confirmation email to sender
-    user_sent = send_email(
+    send_email(
         to=str(body.email),
         subject="✅ We received your message — WandaTools Support",
         html_body=_contact_confirm_html(body.name),
     )
 
-    email_status = "sent" if (team_sent and user_sent) else "queued"
-
     return {
         "id":      msg_id,
         "status":  "received",
-        "email":   email_status,
-        "message": (
-            f"Thank you {body.name}! "
-            f"We'll reply to {body.email} within 24–48 hours."
-        ),
+        "message": f"Thank you {body.name}! We'll reply to {body.email} within 24–48 hours.",
     }
 
-
-# ─────────────────────────────────────────────────────────────
-# FAQ
-# ─────────────────────────────────────────────────────────────
 
 @router.get("/faq")
 async def get_faq(
     search:   str = Query(None, description="Search FAQ by keyword"),
     category: str = Query(None, description="Filter: security, billing, technical, general"),
 ):
-    """
-    Return FAQ items. No authentication required.
-    Optional filters: search keyword and/or category.
-    """
+    """Return FAQ items. No authentication required."""
     valid_categories = {"security", "billing", "technical", "general"}
     if category and category.lower() not in valid_categories:
         raise HTTPException(
@@ -293,23 +206,14 @@ async def get_faq(
         )
 
     items = _FAQ_ITEMS
-
     if search:
         s = search.lower()
-        items = [
-            f for f in items
-            if s in f["question"].lower() or s in f["answer"].lower()
-        ]
-
+        items = [f for f in items if s in f["question"].lower() or s in f["answer"].lower()]
     if category:
         items = [f for f in items if f["category"] == category.lower()]
 
     return {"faq_items": items, "total": len(items)}
 
-
-# ─────────────────────────────────────────────────────────────
-# SUPPORT STATUS
-# ─────────────────────────────────────────────────────────────
 
 @router.get("/status")
 async def get_support_status():
@@ -323,34 +227,16 @@ async def get_support_status():
         },
         "response_time": "24–48 hours",
         "contact_methods": [
-            {
-                "method":        "email",
-                "address":       "admin@wandatools.com",
-                "response_time": "24–48 hours",
-            },
-            {
-                "method":        "phone",
-                "number":        "+268 76 469 3531",
-                "response_time": "During business hours",
-            },
-            {
-                "method": "live_chat",
-                "status": "Coming soon",
-            },
+            {"method": "email", "address": "admin@wandatools.com", "response_time": "24–48 hours"},
+            {"method": "phone", "number": "+268 76 469 3531",      "response_time": "Business hours"},
+            {"method": "live_chat", "status": "Coming soon"},
         ],
     }
 
 
-# ─────────────────────────────────────────────────────────────
-# SYSTEM HEALTH
-# ─────────────────────────────────────────────────────────────
-
 @router.get("/health")
 async def get_system_health(db: Session = Depends(get_db)):
-    """
-    Check system and database health.
-    No authentication required — used by uptime monitors.
-    """
+    """Check system and database health. No authentication required."""
     try:
         db.execute(text("SELECT 1"))
         db_status = "healthy"
@@ -358,10 +244,8 @@ async def get_system_health(db: Session = Depends(get_db)):
         log.error(f"health check DB error: {exc}")
         db_status = "unhealthy"
 
-    overall = "healthy" if db_status == "healthy" else "degraded"
-
     return {
-        "status":    overall,
+        "status":    "healthy" if db_status == "healthy" else "degraded",
         "database":  db_status,
         "api":       "healthy",
         "version":   "2.0.0",
@@ -369,21 +253,10 @@ async def get_system_health(db: Session = Depends(get_db)):
     }
 
 
-# ─────────────────────────────────────────────────────────────
-# SUPPORT TICKETS  (stub — no Ticket model yet)
-# ─────────────────────────────────────────────────────────────
-
 @router.get("/tickets")
 async def get_support_tickets(current_user: User = Depends(get_current_user)):
-    """
-    List support tickets for the authenticated user.
-    Ticket model not yet added to main.py — returns empty list for now.
-    """
-    return {
-        "tickets": [],
-        "total":   0,
-        "message": "Support ticket system coming soon.",
-    }
+    """List support tickets — coming soon."""
+    return {"tickets": [], "total": 0, "message": "Support ticket system coming soon."}
 
 
 @router.post("/tickets", status_code=status.HTTP_201_CREATED)
@@ -392,10 +265,7 @@ async def create_support_ticket(
     current_user: User    = Depends(get_current_user),
     db:           Session = Depends(get_db),
 ):
-    """
-    Create a support ticket for the authenticated user.
-    Ticket model not yet in main.py — saves as a ContactMessage for now.
-    """
+    """Create a support ticket — saves as ContactMessage until Ticket model is added."""
     db_entry = ContactMessage(
         name=current_user.name,
         email=current_user.email,
@@ -408,7 +278,6 @@ async def create_support_ticket(
         db.refresh(db_entry)
     except Exception as exc:
         db.rollback()
-        log.error(f"create_ticket error for user {current_user.id}: {exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not create ticket: {exc}",
@@ -424,17 +293,13 @@ async def create_support_ticket(
 
     log.info(f"🎫 Ticket created by user {current_user.id}: {body.subject}")
     return {
-        "ticket_id": db_entry.id,
-        "status":    "open",
-        "subject":   body.subject,
+        "ticket_id":  db_entry.id,
+        "status":     "open",
+        "subject":    body.subject,
         "created_at": db_entry.created_at.isoformat(),
-        "message":   "Support ticket created. We'll respond within 24–48 hours.",
+        "message":    "Support ticket created. We'll respond within 24–48 hours.",
     }
 
-
-# ─────────────────────────────────────────────────────────────
-# FEEDBACK  (auth required)
-# ─────────────────────────────────────────────────────────────
 
 @router.post("/feedback", status_code=status.HTTP_201_CREATED)
 async def submit_feedback(
@@ -442,11 +307,8 @@ async def submit_feedback(
     current_user: User    = Depends(get_current_user),
     db:           Session = Depends(get_db),
 ):
-    """
-    Submit feedback about WandaTools.
-    Saves as a ContactMessage with the feedback category and rating.
-    """
-    rating_note = f" | Rating: {body.rating}/5" if body.rating else ""
+    """Submit feedback. Saves as ContactMessage."""
+    rating_note  = f" | Rating: {body.rating}/5" if body.rating else ""
     full_message = f"[{body.category.upper()}]{rating_note}\n\n{body.feedback_text}"
 
     db_entry = ContactMessage(
@@ -461,16 +323,12 @@ async def submit_feedback(
         db.refresh(db_entry)
     except Exception as exc:
         db.rollback()
-        log.error(f"feedback error for user {current_user.id}: {exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not save feedback: {exc}",
         )
 
-    log.info(
-        f"💬 Feedback from user {current_user.id}: "
-        f"category={body.category} rating={body.rating}"
-    )
+    log.info(f"💬 Feedback from user {current_user.id}: category={body.category} rating={body.rating}")
     return {
         "feedback_id": db_entry.id,
         "category":    body.category,

@@ -1,28 +1,29 @@
 """
 WandaTools — security.py
+Location: ROOT folder (same level as main.py)
+
 Password hashing, JWT tokens, password strength scoring, MFA/TOTP, and OTP utilities.
 
-IMPORTANT — source of truth:
-  Core JWT functions (create_access_token, create_refresh_token,
-  decode_access_token, decode_refresh_token, hash_password, verify_password)
-  are defined in main.py and RE-EXPORTED here so route files can import
-  from either place without duplication or conflict.
+Source of truth:
+  Core functions (hash_password, verify_password, create_access_token,
+  create_refresh_token, decode_access_token, decode_refresh_token)
+  are defined in main.py and RE-EXPORTED here.
+  Route files can import from security.py OR main.py — both work.
 
-  Everything in this file that is NOT already in main.py is additive:
-    - check_password_strength()   — detailed scoring with feedback
-    - validate_password_strength()— simple pass/fail for registration
-    - MFA/TOTP functions          — authenticator app support
-    - generate_otp()              — 6-digit email OTP
+Additive features (not in main.py):
+  - check_password_strength()    — detailed score + feedback (0-5)
+  - validate_password_strength() — simple pass/fail for registration
+  - MFA/TOTP functions           — authenticator app support
+  - generate_otp()               — 6-digit email OTP
+  - generate_otp_expiry()        — expiry datetime for OTPs
+  - is_otp_expired()             — check if OTP has passed
 
-New pip dependencies needed:
-    pip install pyotp qrcode[pil]
-Add to requirements.txt:
-    pyotp
-    qrcode[pil]
+New dependencies required:
+  pip install pyotp qrcode[pil]
+  Add to requirements.txt: pyotp  and  qrcode[pil]
 """
 
 import base64
-import random
 import re
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -37,14 +38,12 @@ from pydantic import BaseModel
 
 # ─────────────────────────────────────────────────────────────
 # RE-EXPORT from main.py — single source of truth
-# Route files can import from security.py OR main.py — both work.
 # ─────────────────────────────────────────────────────────────
+
 from main import (
-    # Password
     hash_password,
     verify_password,
     pwd_ctx,
-    # JWT core
     JWT_SECRET,
     JWT_REFRESH_SECRET,
     JWT_ALGORITHM,
@@ -56,7 +55,6 @@ from main import (
     decode_refresh_token,
 )
 
-# Config — reads TOTP_ISSUER, PASSWORD_REQUIRE_NUMBERS, etc.
 from config import get_settings
 
 settings = get_settings()
@@ -67,7 +65,7 @@ settings = get_settings()
 # ─────────────────────────────────────────────────────────────
 
 class TokenData(BaseModel):
-    """Decoded JWT token payload — used by route files that need typed access."""
+    """Decoded JWT token payload — typed access for route files."""
     sub:     Optional[str]      = None
     user_id: Optional[int]      = None
     email:   str
@@ -79,7 +77,7 @@ class TokenData(BaseModel):
 class PasswordStrength(BaseModel):
     """Result of password strength evaluation."""
     score:     int         # 0 – 5
-    feedback:  list[str]  # tips for improvement
+    feedback:  list[str]  # improvement tips
     is_strong: bool        # True if score >= 4
 
 
@@ -89,17 +87,17 @@ class PasswordStrength(BaseModel):
 
 def check_password_strength(password: str) -> PasswordStrength:
     """
-    Score a password from 0–5 and return improvement feedback.
-    Used on the frontend to show a strength bar in real time.
+    Score a password 0–5 and return improvement feedback.
+    Used on the frontend to show a real-time strength bar.
 
     Scoring:
-      +1  ≥ 8 characters
-      +1  ≥ 12 characters
+      +1  >= 8 characters
+      +1  >= 12 characters
       +1  contains uppercase
       +1  contains lowercase
       +1  contains digit
       +1  contains special character
-    Max score is capped at 5.
+    Capped at 5.
     """
     score    = 0
     feedback = []
@@ -135,22 +133,14 @@ def check_password_strength(password: str) -> PasswordStrength:
         feedback.append("Add at least one special character (!@#$%^&*)")
 
     score = min(score, 5)
-
-    return PasswordStrength(
-        score=score,
-        feedback=feedback,
-        is_strong=score >= 4,
-    )
+    return PasswordStrength(score=score, feedback=feedback, is_strong=score >= 4)
 
 
 def validate_password_strength(password: str) -> dict:
     """
-    Simple pass/fail password validation used during registration
-    and password change. Reads rules from config settings.
-
-    Returns:
-        {"valid": True, "errors": []}          — password is acceptable
-        {"valid": False, "errors": [...]}       — password is too weak
+    Simple pass/fail password validation.
+    Rules toggled by config settings (PASSWORD_REQUIRE_NUMBERS, PASSWORD_REQUIRE_SPECIAL).
+    Returns: {"valid": True/False, "errors": [...]}
     """
     errors = []
 
@@ -163,7 +153,6 @@ def validate_password_strength(password: str) -> dict:
     if not re.search(r"[a-z]", password):
         errors.append("Password must contain at least one lowercase letter")
 
-    # These two rules can be toggled in config
     if getattr(settings, "PASSWORD_REQUIRE_NUMBERS", True):
         if not re.search(r"\d", password):
             errors.append("Password must contain at least one number")
@@ -181,40 +170,33 @@ def validate_password_strength(password: str) -> dict:
 
 def verify_token(token: str) -> Optional[TokenData]:
     """
-    Decode a JWT (access or refresh) and return a typed TokenData object.
-    Returns None if the token is invalid — does NOT raise an exception.
-    Use this when you want to inspect a token without hard-failing.
+    Decode any JWT and return typed TokenData or None.
+    Does NOT raise — use this when you want to inspect without hard-failing.
     For protected endpoints use decode_access_token() from main.py instead.
     """
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-    except JWTError:
-        # Try the refresh secret as a fallback
+    for secret in (JWT_SECRET, JWT_REFRESH_SECRET):
         try:
-            payload = jwt.decode(token, JWT_REFRESH_SECRET, algorithms=[JWT_ALGORITHM])
-        except JWTError:
-            return None
-
-    try:
-        return TokenData(
-            sub=payload.get("sub"),
-            user_id=int(payload["sub"]) if payload.get("sub") else None,
-            email=payload.get("email", ""),
-            exp=datetime.fromtimestamp(payload["exp"], tz=timezone.utc),
-            iat=datetime.fromtimestamp(payload["iat"], tz=timezone.utc) if payload.get("iat") else None,
-            type=payload.get("type", "access"),
-        )
-    except Exception:
-        return None
+            payload = jwt.decode(token, secret, algorithms=[JWT_ALGORITHM])
+            return TokenData(
+                sub=payload.get("sub"),
+                user_id=int(payload["sub"]) if payload.get("sub") else None,
+                email=payload.get("email", ""),
+                exp=datetime.fromtimestamp(payload["exp"], tz=timezone.utc),
+                iat=datetime.fromtimestamp(payload["iat"], tz=timezone.utc) if payload.get("iat") else None,
+                type=payload.get("type", "access"),
+            )
+        except (JWTError, Exception):
+            continue
+    return None
 
 
 def verify_token_type(payload: dict, expected_type: str = "access") -> bool:
-    """Check that a decoded payload's 'type' field matches expected_type."""
+    """Check a decoded payload's 'type' matches expected_type."""
     return payload.get("type") == expected_type
 
 
 def get_user_id_from_token(payload: dict) -> Optional[int]:
-    """Safely extract the integer user_id from a decoded token payload."""
+    """Safely extract integer user_id from a decoded token payload."""
     try:
         return int(payload["sub"])
     except (KeyError, ValueError, TypeError):
@@ -222,10 +204,7 @@ def get_user_id_from_token(payload: dict) -> Optional[int]:
 
 
 def is_token_expired(payload: dict) -> bool:
-    """
-    Return True if the token's 'exp' claim is in the past.
-    Safe to call on any decoded payload dict.
-    """
+    """Return True if the token's 'exp' claim is in the past."""
     try:
         exp = payload.get("exp")
         if exp is None:
@@ -237,9 +216,8 @@ def is_token_expired(payload: dict) -> bool:
 
 def decode_token(token: str) -> Optional[dict]:
     """
-    Decode any JWT (tries access secret, then refresh secret).
-    Returns the raw payload dict or None — does NOT raise.
-    Used by auth.py's get_current_user dependency.
+    Decode any JWT — tries access secret then refresh secret.
+    Returns raw payload dict or None. Does NOT raise.
     """
     for secret in (JWT_SECRET, JWT_REFRESH_SECRET):
         try:
@@ -257,8 +235,7 @@ def decode_token(token: str) -> Optional[dict]:
 def generate_totp_secret() -> str:
     """
     Generate a random TOTP secret key.
-    Store this on the User model (e.g. user.totp_secret) when MFA is enabled.
-    Never expose this secret in API responses after setup.
+    Store on the User model (e.g. user.totp_secret) when MFA is enabled.
     """
     return pyotp.random_base32()
 
@@ -266,12 +243,8 @@ def generate_totp_secret() -> str:
 def generate_totp_qr(email: str, secret: str) -> str:
     """
     Generate a QR code for TOTP authenticator app setup.
-    Returns a base64-encoded PNG image string (data:image/png;base64,...).
-    Show this on the MFA setup page — user scans it with Google Authenticator etc.
-
-    Args:
-        email:  The user's email (shown as account name in the authenticator app)
-        secret: The user's TOTP secret from generate_totp_secret()
+    Returns a base64-encoded PNG (data:image/png;base64,...).
+    Show on the MFA setup page — user scans with Google Authenticator etc.
     """
     issuer = getattr(settings, "TOTP_ISSUER", "WandaTools")
     totp   = pyotp.TOTP(secret)
@@ -292,30 +265,23 @@ def generate_totp_qr(email: str, secret: str) -> str:
 
 def verify_totp(secret: str, token: str) -> bool:
     """
-    Verify a 6-digit TOTP token from the user's authenticator app.
-    Allows a ±1 window (30 seconds either side) to account for clock drift.
-
-    Args:
-        secret: The stored TOTP secret for this user
-        token:  The 6-digit code the user entered
+    Verify a 6-digit TOTP from the user's authenticator app.
+    Allows ±1 window (30 seconds either side) for clock drift.
     """
     return pyotp.TOTP(secret).verify(token, valid_window=1)
 
 
 # ─────────────────────────────────────────────────────────────
-# EMAIL OTP — 6-digit one-time password for email verification
+# EMAIL OTP — 6-digit one-time password
 # ─────────────────────────────────────────────────────────────
 
 def generate_otp() -> str:
     """
-    Generate a cryptographically random 6-digit OTP for email verification
-    or SMS-based MFA. Uses secrets.randbelow for better randomness than random.
-
-    Returns:
-        A zero-padded 6-digit string e.g. "048271"
+    Generate a cryptographically random 6-digit OTP.
+    Always 6 digits, never less than 100000.
     """
     import secrets as _secrets
-    return str(_secrets.randbelow(900000) + 100000)   # always 6 digits, never < 100000
+    return str(_secrets.randbelow(900000) + 100000)
 
 
 def generate_otp_expiry(minutes: int = 10) -> datetime:

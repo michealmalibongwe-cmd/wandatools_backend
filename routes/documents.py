@@ -1,104 +1,129 @@
 """
-Document Model
-Represents generated financial reports and documents
+WandaTools — routes/documents.py
+Location: routes/ folder
+
+Document generation endpoints — stub until Document model is added to main.py.
+
+When ready to activate:
+  1. Add Document model to main.py
+  2. Add to User relationships: documents = relationship("Document", ...)
+  3. Import in main.py: from routes.documents import Document
+  4. Replace stub responses below with real logic
 """
 
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Float, Enum as SQLEnum
-from sqlalchemy.orm import relationship
+import logging
 from datetime import datetime
-import enum
+from typing import Optional
 
-from db import Base
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, field_validator
+from sqlalchemy.orm import Session
+
+from db import get_db
+from main import User
+from routes.auth import get_current_user
+
+log    = logging.getLogger("wandatools.documents")
+router = APIRouter(prefix="/api/v1/documents", tags=["Documents"])
+
+VALID_DOC_TYPES = {
+    "audit_report", "loan_application", "investment_report",
+    "monthly_summary", "cash_flow", "tax_summary",
+}
+
+# ─────────────────────────────────────────────────────────────
+# SCHEMAS
+# ─────────────────────────────────────────────────────────────
+
+class DocumentCreateRequest(BaseModel):
+    type:         str
+    period_start: Optional[str] = None
+    period_end:   Optional[str] = None
+
+    @field_validator("type")
+    @classmethod
+    def type_valid(cls, v: str) -> str:
+        if v not in VALID_DOC_TYPES:
+            raise ValueError(f"type must be one of: {', '.join(VALID_DOC_TYPES)}")
+        return v
 
 
-class DocumentType(str, enum.Enum):
-    """Types of documents that can be generated"""
-    AUDIT_REPORT = "audit_report"
-    LOAN_APPLICATION = "loan_application"
-    INVESTMENT_REPORT = "investment_report"
-    MONTHLY_SUMMARY = "monthly_summary"
-    CASH_FLOW = "cash_flow"
-    TAX_SUMMARY = "tax_summary"
+# ─────────────────────────────────────────────────────────────
+# STUB RESPONSE — used until Document model is added
+# ─────────────────────────────────────────────────────────────
+
+_STUB = {
+    "message":    "Document generation is coming soon.",
+    "status":     "not_implemented",
+    "doc_types":  list(VALID_DOC_TYPES),
+    "hint":       "Add the Document model to main.py to activate this feature.",
+}
 
 
-class DocumentStatus(str, enum.Enum):
-    """Document generation status"""
-    PENDING = "pending"
-    GENERATING = "generating"
-    READY = "ready"
-    FAILED = "failed"
-    EXPIRED = "expired"
+# ─────────────────────────────────────────────────────────────
+# ENDPOINTS
+# ─────────────────────────────────────────────────────────────
 
-
-class Document(Base):
+@router.post("", status_code=status.HTTP_201_CREATED)
+async def generate_document(
+    body:         DocumentCreateRequest,
+    current_user: User    = Depends(get_current_user),
+    db:           Session = Depends(get_db),
+):
     """
-    Document model for storing generated reports
+    Generate a financial document/report.
+    Returns a stub response until the Document model is added to main.py.
     """
-    __tablename__ = "documents"
-    
-    # Primary key
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    
-    # Document information
-    type = Column(SQLEnum(DocumentType), nullable=False, index=True)
-    status = Column(SQLEnum(DocumentStatus), default=DocumentStatus.PENDING, nullable=False, index=True)
-    
-    # File details
-    filename = Column(String(255), nullable=False)
-    file_path = Column(String(500), nullable=True)
-    file_size = Column(Integer, nullable=True)  # in bytes
-    file_url = Column(String(500), nullable=True)  # Public URL for download
-    
-    # Content metadata
-    period_start = Column(DateTime, nullable=True, comment="Report period start date")
-    period_end = Column(DateTime, nullable=True, comment="Report period end date")
-    
-    # Statistics included
-    total_revenue = Column(Float, nullable=True)
-    total_expenses = Column(Float, nullable=True)
-    net_profit = Column(Float, nullable=True)
-    
-    # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    downloaded_at = Column(DateTime, nullable=True)
-    expires_at = Column(DateTime, nullable=True)
-    
-    # Metadata
-    generated_by = Column(String(50), default="system", comment="user or system")
-    error_message = Column(String(1000), nullable=True)  # If status is FAILED
-    
-    # Relationship
-    user = relationship("User", back_populates="documents")
-    
-    def __repr__(self):
-        return f"<Document(id={self.id}, user_id={self.user_id}, type='{self.type}', status='{self.status}')>"
+    log.info(f"📄 Document request: user={current_user.id} type={body.type} [STUB]")
+    return {
+        **_STUB,
+        "requested_type": body.type,
+        "user_id":        current_user.id,
+        "requested_at":   datetime.utcnow().isoformat(),
+    }
 
 
-class DocumentTemplate(Base):
-    """
-    Templates for document generation
-    Stores pre-designed report templates
-    """
-    __tablename__ = "document_templates"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    
-    # Template info
-    type = Column(SQLEnum(DocumentType), nullable=False, unique=True)
-    name = Column(String(255), nullable=False)
-    description = Column(String(500))
-    
-    # Template content
-    html_template = Column(String(5000), nullable=False)
-    css_styles = Column(String(2000), nullable=True)
-    
-    # Configuration
-    include_charts = Column(String(200), nullable=True, comment="JSON: chart types to include")
-    include_tables = Column(String(200), nullable=True, comment="JSON: tables to include")
-    
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    def __repr__(self):
-        return f"<DocumentTemplate(id={self.id}, type='{self.type}')>"
+@router.get("")
+async def list_documents(
+    current_user: User    = Depends(get_current_user),
+    db:           Session = Depends(get_db),
+    skip:         int     = Query(0,  ge=0),
+    limit:        int     = Query(10, ge=1, le=100),
+):
+    """List all documents for the authenticated user."""
+    return {**_STUB, "items": [], "total": 0, "page": 1}
+
+
+@router.get("/{document_id}")
+async def get_document(
+    document_id:  int,
+    current_user: User    = Depends(get_current_user),
+    db:           Session = Depends(get_db),
+):
+    """Get a specific document by ID."""
+    return {**_STUB, "document_id": document_id}
+
+
+@router.delete("/{document_id}", status_code=status.HTTP_200_OK)
+async def delete_document(
+    document_id:  int,
+    current_user: User    = Depends(get_current_user),
+    db:           Session = Depends(get_db),
+):
+    """Delete a document by ID."""
+    return {**_STUB, "document_id": document_id}
+
+
+@router.get("/types/list")
+async def list_document_types(current_user: User = Depends(get_current_user)):
+    """List all supported document types."""
+    return {
+        "doc_types": [
+            {"id": "audit_report",      "name": "Audit Report",         "description": "Full audit-ready financial report"},
+            {"id": "loan_application",  "name": "Loan Application",     "description": "Bank loan application package"},
+            {"id": "investment_report", "name": "Investment Report",    "description": "Investment summary for stakeholders"},
+            {"id": "monthly_summary",   "name": "Monthly Summary",      "description": "Monthly income and expense breakdown"},
+            {"id": "cash_flow",         "name": "Cash Flow Analysis",   "description": "Detailed cash flow statement"},
+            {"id": "tax_summary",       "name": "Tax Summary",          "description": "Annual tax-ready summary"},
+        ]
+    }

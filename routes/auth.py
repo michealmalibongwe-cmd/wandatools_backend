@@ -1,9 +1,15 @@
 """
 WandaTools — routes/auth.py
+Location: routes/ folder
+
 Authentication routes: register, login, refresh, logout, profile management.
 
-All security functions, models, and DB session are imported from main.py and db.py.
-No duplicate definitions — single source of truth.
+Imports:
+  - DB session     → db.py
+  - Models         → main.py  (User, RefreshToken)
+  - Security       → main.py  (hash_password, verify_password, JWT functions)
+  - Email          → services/email.py  (EmailService)
+  - Notifications  → notifications.py  (NotificationService)
 
 Endpoints:
   POST   /api/v1/auth/register         — create account
@@ -19,37 +25,35 @@ Endpoints:
 import logging
 import re
 from datetime import datetime, timedelta
-from services.email import EmailService
+
 from fastapi import APIRouter, Depends, HTTPException, Header, status
 from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy.orm import Session
 
 from db import get_db
 from main import (
-    # Models
     User,
     RefreshToken,
-    # Security functions
     hash_password,
     verify_password,
     create_access_token,
     create_refresh_token,
     decode_access_token,
     decode_refresh_token,
-    # Constants
     REFRESH_TOKEN_DAYS,
     ACCESS_TOKEN_MINUTES,
     SUPPORTED_CURRENCIES,
     DEFAULT_CURRENCY,
 )
+from notifications import NotificationService
+from services.email import EmailService
 
-log = logging.getLogger("wandatools.auth")
-
+log    = logging.getLogger("wandatools.auth")
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 
 
 # ─────────────────────────────────────────────────────────────
-# PYDANTIC SCHEMAS  (request + response shapes)
+# PYDANTIC SCHEMAS
 # ─────────────────────────────────────────────────────────────
 
 class RegisterRequest(BaseModel):
@@ -108,41 +112,17 @@ class ChangePasswordRequest(BaseModel):
     new_password:     str
 
 
-class TokenResponse(BaseModel):
-    access_token:       str
-    refresh_token:      str
-    token_type:         str = "bearer"
-    access_expires_in:  int     # seconds
-    refresh_expires_in: int     # seconds
-    user:               dict
-
-
-class UserResponse(BaseModel):
-    id:            int
-    name:          str
-    email:         str
-    business_type: str | None
-    timezone:      str
-    currency:      str
-    created_at:    str
-
-
 # ─────────────────────────────────────────────────────────────
 # PASSWORD VALIDATION
 # ─────────────────────────────────────────────────────────────
 
 def validate_password(password: str) -> None:
     """
-    Enforces strong password rules. Raises HTTPException if any rule fails.
-    Rules:
-      - At least 8 characters
-      - At least one uppercase letter
-      - At least one lowercase letter
-      - At least one digit
-      - At least one special character
+    Enforce strong password rules.
+    Raises HTTPException 422 if any rule fails.
+    Rules: 8+ chars, uppercase, lowercase, digit, special character.
     """
     errors = []
-
     if len(password) < 8:
         errors.append("Password must be at least 8 characters long")
     if not re.search(r"[A-Z]", password):
@@ -153,7 +133,6 @@ def validate_password(password: str) -> None:
         errors.append("Password must contain at least one number")
     if not re.search(r"[!@#$%^&*(),.?\":{}|<>_\-]", password):
         errors.append("Password must contain at least one special character (!@#$%^&* etc.)")
-
     if errors:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -162,19 +141,17 @@ def validate_password(password: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-# SHARED DEPENDENCY — get the logged-in user from the header
+# SHARED DEPENDENCY — get logged-in user from Authorization header
 # ─────────────────────────────────────────────────────────────
 
 def get_current_user(
-    authorization: str = Header(default=None),
-    db: Session = Depends(get_db),
+    authorization: str     = Header(default=None),
+    db:            Session = Depends(get_db),
 ) -> User:
     """
-    FastAPI dependency — validates the Authorization header,
-    decodes the JWT access token, and returns the User row.
-
-    Usage in any endpoint:
-        current_user: User = Depends(get_current_user)
+    FastAPI dependency — validates the JWT access token and returns the User row.
+    Import this into any route file that needs the authenticated user:
+        from routes.auth import get_current_user
     """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
@@ -182,9 +159,8 @@ def get_current_user(
             detail="Authorization header missing. Format: 'Bearer <access_token>'",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
     token   = authorization[7:]
-    payload = decode_access_token(token)        # raises 401 if invalid/expired
+    payload = decode_access_token(token)
     user_id = int(payload["sub"])
 
     user = db.query(User).filter(User.id == user_id).first()
@@ -198,10 +174,7 @@ def get_current_user(
 
 
 def _build_token_response(user: User, db: Session) -> dict:
-    """
-    Helper: create access + refresh token pair, persist refresh token in DB,
-    and return the full token response dict.
-    """
+    """Create access + refresh token pair, persist refresh token, return response dict."""
     access_token  = create_access_token(user.id, user.email)
     refresh_token = create_refresh_token(user.id, user.email)
 
@@ -239,32 +212,35 @@ async def register(body: RegisterRequest, db: Session = Depends(get_db)):
     Create a new WandaTools account.
     Password is bcrypt-hashed. Returns a JWT access + refresh token pair.
     """
-    # 1. Duplicate email check
     if db.query(User).filter(User.email == body.email).first():
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"An account with email '{body.email}' already exists",
         )
 
-    # 2. Password strength enforcement
     validate_password(body.password)
 
-    # 3. Create the user row
     try:
         user = User(
             name=body.name,
             email=body.email,
-            password=hash_password(body.password),      # bcrypt hash
+            password=hash_password(body.password),
             business_type=body.business_type,
             timezone=body.timezone,
             currency=body.currency.upper(),
         )
         db.add(user)
-        db.flush()      # assigns user.id before creating token row
+        db.flush()
 
+        # _build_token_response adds the refresh token and calls db.commit() internally,
+        # which also commits the flushed user row. No second commit needed here.
         response = _build_token_response(user, db)
-        db.commit()
-        
+
+        # Send welcome email — wrapped so email failure never blocks registration
+        try:
+            EmailService.send_welcome_email(user.email, user.name, user.currency)
+        except Exception as email_exc:
+            log.warning(f"⚠️  Welcome email failed for {user.email}: {email_exc}")
 
         log.info(f"✅ New user registered: {user.id} ({user.email})")
         return {**response, "message": "✅ Account created successfully!"}
@@ -276,7 +252,7 @@ async def register(body: RegisterRequest, db: Session = Depends(get_db)):
         log.error(f"register error for {body.email}: {exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Registration failed — please try again. ({exc})",
+            detail=f"Registration failed — please try again: {exc}",
         )
 
 
@@ -289,11 +265,10 @@ async def login(body: LoginRequest, db: Session = Depends(get_db)):
     """
     Sign in with email + password.
     Returns a new JWT access token (30 min) + refresh token (7 days).
+    Same error for wrong email or wrong password — prevents user enumeration.
     """
     user = db.query(User).filter(User.email == body.email).first()
 
-    # Use the same error message for wrong email OR wrong password.
-    # Never reveal which one was wrong — prevents user enumeration attacks.
     if not user or not verify_password(body.password, user.password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -324,21 +299,18 @@ async def login(body: LoginRequest, db: Session = Depends(get_db)):
 @router.post("/refresh")
 async def refresh(body: RefreshRequest, db: Session = Depends(get_db)):
     """
-    Exchange a valid refresh token for a brand-new access + refresh token pair.
+    Exchange a valid refresh token for a new access + refresh token pair.
     The old refresh token is revoked immediately (token rotation).
-    Call this when your access token expires — the frontend should do this automatically.
     """
-    # 1. Verify JWT signature and expiry
     payload = decode_refresh_token(body.refresh_token)
     user_id = int(payload["sub"])
 
-    # 2. Check token exists in DB and is not revoked
     stored = (
         db.query(RefreshToken)
         .filter(
-            RefreshToken.token    == body.refresh_token,
-            RefreshToken.user_id  == user_id,
-            RefreshToken.revoked  == False,             # noqa: E712
+            RefreshToken.token   == body.refresh_token,
+            RefreshToken.user_id == user_id,
+            RefreshToken.revoked == False,          # noqa: E712
         )
         .first()
     )
@@ -357,7 +329,6 @@ async def refresh(body: RefreshRequest, db: Session = Depends(get_db)):
             detail="Refresh token has expired — please log in again",
         )
 
-    # 3. Load user
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(
@@ -366,10 +337,7 @@ async def refresh(body: RefreshRequest, db: Session = Depends(get_db)):
         )
 
     try:
-        # 4. Revoke the old refresh token (rotation — can't reuse it)
         stored.revoked = True
-
-        # 5. Issue a fresh pair
         response = _build_token_response(user, db)
         log.info(f"🔄 Token rotated for user {user.id}")
         return response
@@ -392,20 +360,19 @@ async def refresh(body: RefreshRequest, db: Session = Depends(get_db)):
 @router.post("/logout", status_code=status.HTTP_200_OK)
 async def logout(
     body:         RefreshRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User    = Depends(get_current_user),
     db:           Session = Depends(get_db),
 ):
     """
     Logout by revoking the refresh token in the database.
-    Pass the refresh token in the request body.
-    The access token expires naturally (max 30 min) — no blacklist needed.
+    The access token expires naturally (max 30 min).
     """
     stored = (
         db.query(RefreshToken)
         .filter(
-            RefreshToken.token    == body.refresh_token,
-            RefreshToken.user_id  == current_user.id,
-            RefreshToken.revoked  == False,             # noqa: E712
+            RefreshToken.token   == body.refresh_token,
+            RefreshToken.user_id == current_user.id,
+            RefreshToken.revoked == False,          # noqa: E712
         )
         .first()
     )
@@ -424,10 +391,7 @@ async def logout(
 
 @router.get("/me")
 async def get_me(current_user: User = Depends(get_current_user)):
-    """
-    Return the authenticated user's full profile.
-    No DB query needed — get_current_user already loaded the user row.
-    """
+    """Return the authenticated user's full profile."""
     return {
         "id":            current_user.id,
         "name":          current_user.name,
@@ -446,13 +410,10 @@ async def get_me(current_user: User = Depends(get_current_user)):
 @router.put("/profile")
 async def update_profile(
     body:         ProfileUpdateRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User    = Depends(get_current_user),
     db:           Session = Depends(get_db),
 ):
-    """
-    Update name, timezone, currency, or business type.
-    Only fields you include in the request body are updated.
-    """
+    """Update name, timezone, currency, or business type. Only include fields to change."""
     changed = False
 
     if body.name is not None:
@@ -513,44 +474,42 @@ async def update_profile(
 @router.post("/change-password", status_code=status.HTTP_200_OK)
 async def change_password(
     body:         ChangePasswordRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User    = Depends(get_current_user),
     db:           Session = Depends(get_db),
 ):
     """
     Change the logged-in user's password.
-    Requires the current password to confirm identity.
-    All existing refresh tokens are revoked so other devices are logged out.
+    Requires the current password. Revokes all refresh tokens on all devices.
     """
-    # 1. Verify current password
     if not verify_password(body.current_password, current_user.password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Current password is incorrect",
         )
 
-    # 2. New password must be different
     if body.current_password == body.new_password:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="New password must be different from your current password",
         )
 
-    # 3. Validate strength of new password
     validate_password(body.new_password)
 
     try:
-        # 4. Hash and save the new password
         current_user.password = hash_password(body.new_password)
 
-        # 5. Revoke ALL refresh tokens for this user (forces re-login on all devices)
+        # Revoke ALL refresh tokens — forces re-login on all devices
         db.query(RefreshToken).filter(
             RefreshToken.user_id == current_user.id,
-            RefreshToken.revoked == False,              # noqa: E712
+            RefreshToken.revoked == False,          # noqa: E712
         ).update({"revoked": True})
 
         db.commit()
-        log.info(f"🔑 Password changed for user {current_user.id} — all sessions revoked")
 
+        # Notify user their password was changed
+        NotificationService.notify_password_changed(db=db, user_id=current_user.id)
+
+        log.info(f"🔑 Password changed for user {current_user.id} — all sessions revoked")
         return {
             "message": (
                 "✅ Password changed successfully. "
@@ -574,19 +533,19 @@ async def change_password(
 
 @router.delete("/account", status_code=status.HTTP_200_OK)
 async def delete_account(
-    current_user: User = Depends(get_current_user),
+    current_user: User    = Depends(get_current_user),
     db:           Session = Depends(get_db),
 ):
     """
     Permanently delete the authenticated user's account and all associated data.
-    This includes all transactions and refresh tokens (cascade delete).
+    Includes all transactions, refresh tokens, and notifications (cascade delete).
     This action cannot be undone.
     """
     user_id    = current_user.id
     user_email = current_user.email
 
     try:
-        db.delete(current_user)    # cascade deletes transactions + refresh_tokens
+        db.delete(current_user)
         db.commit()
         log.warning(f"🗑️  Account deleted: user {user_id} ({user_email})")
         return {"message": "✅ Your account and all associated data have been permanently deleted."}
