@@ -47,6 +47,34 @@ router = APIRouter(prefix="/api/v1/tools", tags=["Tools"])
 VALID_TYPES = {"income", "expense"}
 
 
+def _parse_iso_date(date_str: str) -> datetime:
+    """
+    Parse an ISO date string to a naive datetime object.
+
+    Accepted formats:
+      YYYY-MM-DD                  plain date (frontend date input)
+      YYYY-MM-DDTHH:MM:SS         local datetime
+      YYYY-MM-DDTHH:MM:SS.fffZ   JS Date.toISOString() output
+      YYYY-MM-DDTHH:MM:SS+HH:MM  timezone-aware ISO 8601
+
+    Python < 3.11 does not recognise 'Z' as a valid timezone suffix in
+    datetime.fromisoformat(), so we normalise it to '+00:00' first.
+    The result is stored timezone-naive (UTC assumed).
+    """
+    try:
+        normalized = date_str.strip().replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        return dt.replace(tzinfo=None) if dt.tzinfo else dt
+    except (ValueError, AttributeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Invalid date '{date_str}' — "
+                "use ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"
+            ),
+        )
+
+
 # ─────────────────────────────────────────────────────────────
 # PYDANTIC SCHEMAS
 # ─────────────────────────────────────────────────────────────
@@ -174,13 +202,7 @@ async def create_transaction(
     currency defaults to the user's set currency if not provided.
     transaction_date must be ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS
     """
-    try:
-        parsed_date = datetime.fromisoformat(body.transaction_date)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Invalid transaction_date '{body.transaction_date}' — use ISO format: YYYY-MM-DD",
-        )
+    parsed_date = _parse_iso_date(body.transaction_date)
 
     txn_currency = (body.currency or current_user.currency).upper()
     if txn_currency not in SUPPORTED_CURRENCIES:
@@ -270,26 +292,14 @@ async def list_transactions(
             query = query.filter(Transaction.category == category)
 
         if start_date:
-            try:
-                query = query.filter(
-                    Transaction.transaction_date >= datetime.fromisoformat(start_date)
-                )
-            except ValueError:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"Invalid start_date '{start_date}' — use YYYY-MM-DD",
-                )
+            query = query.filter(
+                Transaction.transaction_date >= _parse_iso_date(start_date)
+            )
 
         if end_date:
-            try:
-                query = query.filter(
-                    Transaction.transaction_date <= datetime.fromisoformat(end_date)
-                )
-            except ValueError:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"Invalid end_date '{end_date}' — use YYYY-MM-DD",
-                )
+            query = query.filter(
+                Transaction.transaction_date <= _parse_iso_date(end_date)
+            )
 
         query = query.order_by(Transaction.transaction_date.desc())
         total = query.count()
@@ -385,13 +395,7 @@ async def update_transaction(
         if body.description is not None:
             txn.description = body.description.strip()
         if body.transaction_date is not None:
-            try:
-                txn.transaction_date = datetime.fromisoformat(body.transaction_date)
-            except ValueError:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"Invalid transaction_date '{body.transaction_date}' — use YYYY-MM-DD",
-                )
+            txn.transaction_date = _parse_iso_date(body.transaction_date)
         if body.currency is not None:
             c = body.currency.upper()
             if c not in SUPPORTED_CURRENCIES:

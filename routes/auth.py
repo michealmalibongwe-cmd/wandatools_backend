@@ -396,6 +396,7 @@ async def get_me(current_user: User = Depends(get_current_user)):
         "id":            current_user.id,
         "name":          current_user.name,
         "email":         current_user.email,
+        "account_type":  current_user.business_type or "Individual",
         "business_type": current_user.business_type,
         "timezone":      current_user.timezone,
         "currency":      current_user.currency,
