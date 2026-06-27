@@ -1,3 +1,4 @@
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
@@ -5,19 +6,19 @@ from sqlalchemy import pool
 
 from alembic import context
 
-# this is the Alembic Config object, which provides
-# access to the values within the .ini file in use.
 config = context.config
 
-# Interpret the config file for Python logging.
-# This line sets up loggers basically.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# add your model's MetaData object here
-# for 'autogenerate' support
-# from myapp import mymodel
-# target_metadata = mymodel.Base.metadata
+# Override sqlalchemy.url from DATABASE_URL env var so Railway/production
+# deployments don't use the placeholder in alembic.ini.
+db_url = os.environ.get("DATABASE_URL", "")
+if db_url:
+    # Railway sometimes provides postgres:// which SQLAlchemy 2.x doesn't accept
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
+    config.set_main_option("sqlalchemy.url", db_url)
+
 target_metadata = None
 
 # other values from the config, defined by the needs of env.py,
