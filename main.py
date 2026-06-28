@@ -439,6 +439,7 @@ from routes.wandaai   import router as wandaai_router   # noqa: E402
 from routes.support   import router as support_router   # noqa: E402
 from routes.users     import router as users_router     # noqa: E402
 from routes.documents import router as documents_router # noqa: E402
+from routes.export    import router as export_router    # noqa: E402
 
 app.include_router(auth_router)
 app.include_router(tools_router)
@@ -446,6 +447,7 @@ app.include_router(wandaai_router)
 app.include_router(support_router)
 app.include_router(users_router)
 app.include_router(documents_router)
+app.include_router(export_router)
 
 # routes/transactions.py contains models only (no router).
 # Uncomment below if you later add transaction-specific endpoints there:
