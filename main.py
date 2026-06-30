@@ -65,11 +65,12 @@ from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-from fastapi import FastAPI, HTTPException, Header, status
+from fastapi import FastAPI, HTTPException, Header, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import (
     Boolean, Column, DateTime, ForeignKey,
-    Integer, String, create_engine, text
+    Integer, JSON, String, Text, create_engine, text
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from passlib.context import CryptContext
@@ -249,6 +250,7 @@ class User(Base):
     monthly_summaries = relationship("MonthlyTransactionSummary", back_populates="user", cascade="all, delete-orphan")
     notifications     = relationship("Notification",              back_populates="user", cascade="all, delete-orphan")
     notification_logs = relationship("NotificationLog",           back_populates="user", cascade="all, delete-orphan")
+    push_subscriptions = relationship("PushSubscription",         back_populates="user", cascade="all, delete-orphan")
 
 
 class RefreshToken(Base):
@@ -275,6 +277,40 @@ class ContactMessage(Base):
     subject    = Column(String(255),  nullable=True)
     message    = Column(String(2000), nullable=False)
     created_at = Column(DateTime,     default=datetime.utcnow)
+
+
+class PushSubscription(Base):
+    """Web Push API subscription — one row per browser/device per user."""
+    __tablename__ = "push_subscriptions"
+
+    id         = Column(Integer,      primary_key=True, index=True)
+    user_id    = Column(Integer,      ForeignKey("users.id", ondelete="CASCADE"),
+                        nullable=False, index=True)
+    endpoint   = Column(String(2000), nullable=False, unique=True)
+    p256dh     = Column(String(500),  nullable=False)   # browser public key
+    auth       = Column(String(200),  nullable=False)   # browser auth secret
+    user_agent = Column(String(500),  nullable=True)
+    created_at = Column(DateTime,     default=datetime.utcnow)
+    last_used  = Column(DateTime,     nullable=True)
+
+    user = relationship("User", back_populates="push_subscriptions")
+
+
+class PwaEvent(Base):
+    """
+    Single row for every logged PWA / service-worker lifecycle event.
+    user_id is nullable — SW events (install, activate) fire before login.
+    """
+    __tablename__ = "pwa_events"
+
+    id         = Column(Integer,     primary_key=True, index=True)
+    user_id    = Column(Integer,     ForeignKey("users.id", ondelete="SET NULL"),
+                        nullable=True, index=True)
+    event_type = Column(String(50),  nullable=False, index=True)
+    data       = Column(JSON,        nullable=True)
+    ip_address = Column(String(45),  nullable=True)
+    user_agent = Column(String(500), nullable=True)
+    created_at = Column(DateTime,    default=datetime.utcnow, nullable=False, index=True)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -390,7 +426,7 @@ def _contact_confirm_html(name: str) -> str:
 app = FastAPI(
     title="WandaTools API",
     description="AI-powered financial insights for Eswatini small businesses",
-    version="2.0.0",
+    version="2.1.0",
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
 )
@@ -407,6 +443,58 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ═══════════════════════════════════════════════════════════════
+# SECURITY HEADERS MIDDLEWARE
+# Applied to every response. Enforces HTTPS, prevents clickjacking,
+# and sets a strict CSP appropriate for a pure API server.
+# ═══════════════════════════════════════════════════════════════
+
+_ENVIRONMENT = os.getenv("ENVIRONMENT", "production").lower()
+
+# Paths whose responses may be cached by the browser (public or private)
+_CACHE_RULES: list[tuple[str, str]] = [
+    ("/api/v1/pwa/manifest",     "public, max-age=3600, stale-while-revalidate=86400"),
+    ("/api/v1/pwa/offline-data", "private, max-age=300, stale-while-revalidate=600"),
+    ("/health",                  "no-cache"),
+    ("/",                        "public, max-age=60"),
+]
+# Everything else gets: private, no-store (no sensitive data leaks)
+_DEFAULT_CACHE = "private, no-store"
+
+
+@app.middleware("http")
+async def security_and_cache_middleware(request: Request, call_next):
+    response = await call_next(request)
+
+    # Security headers
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"]        = "DENY"
+    response.headers["Referrer-Policy"]        = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"]     = (
+        "camera=(), microphone=(), geolocation=(self), payment=()"
+    )
+    # API-only CSP — no scripts/styles served from this origin
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'none'; frame-ancestors 'none';"
+    )
+    if _ENVIRONMENT == "production":
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=31536000; includeSubDomains; preload"
+        )
+
+    # Cache-Control (only set if the route handler hasn't already set one)
+    if "cache-control" not in response.headers:
+        path = request.url.path
+        cache_value = _DEFAULT_CACHE
+        for prefix, rule in _CACHE_RULES:
+            if path.startswith(prefix):
+                cache_value = rule
+                break
+        response.headers["Cache-Control"] = cache_value
+
+    return response
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -440,6 +528,7 @@ from routes.support   import router as support_router   # noqa: E402
 from routes.users     import router as users_router     # noqa: E402
 from routes.documents import router as documents_router # noqa: E402
 from routes.export    import router as export_router    # noqa: E402
+from routes.pwa       import router as pwa_router       # noqa: E402
 
 app.include_router(auth_router)
 app.include_router(tools_router)
@@ -448,6 +537,7 @@ app.include_router(support_router)
 app.include_router(users_router)
 app.include_router(documents_router)
 app.include_router(export_router)
+app.include_router(pwa_router)
 
 # routes/transactions.py contains models only (no router).
 # Uncomment below if you later add transaction-specific endpoints there:
