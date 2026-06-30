@@ -591,6 +591,12 @@ async def health():
         db.close()
 
 
+@app.get("/test-push")
+async def test_push():
+    """Public smoke-test — confirms the service is reachable on Railway."""
+    return {"detail": "push working"}
+
+
 @app.get("/api/v1")
 async def api_info():
     """API version info."""
