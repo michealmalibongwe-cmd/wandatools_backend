@@ -3,6 +3,7 @@ WandaTools — routes/pwa.py
 PWA support: manifest, delta sync, offline snapshot, push subscriptions, analytics.
 
 Endpoints (all under /api/v1/pwa):
+  GET    /vapid-public-key      — VAPID public key for pushManager.subscribe() (public)
   GET    /manifest              — API version + cache strategy hints (public)
   GET    /sync                  — Delta sync: data changed since last_sync (auth)
   GET    /offline-data          — Lightweight full snapshot for offline cache (auth)
@@ -59,11 +60,17 @@ SCHEMA_VERSION  = "2026-06-30"
 # PYDANTIC SCHEMAS
 # ─────────────────────────────────────────────────────────────
 
+class PushSubscribeKeys(BaseModel):
+    p256dh: str
+    auth:   str
+
+
 class PushSubscribeRequest(BaseModel):
-    endpoint:   str
-    p256dh:     str
-    auth:       str
-    user_agent: Optional[str] = None
+    """Accepts the browser's native PushSubscription.toJSON() format."""
+    endpoint:       str
+    expirationTime: Optional[float] = None
+    keys:           PushSubscribeKeys
+    user_agent:     Optional[str]   = None
 
 
 class PushUnsubscribeRequest(BaseModel):
@@ -97,12 +104,11 @@ def _serialize_notification(n: Notification) -> dict:
 def _send_push(endpoint: str, p256dh: str, auth_key: str,
                title: str, body: str, data: dict | None = None) -> bool:
     """
-    Send a single Web Push notification using VAPID.
-    Requires VAPID_PRIVATE_KEY and VAPID_CLAIMS_EMAIL env vars to be set.
-    Returns True on success, False on any failure (never raises).
+    Send a single Web Push notification using VAPID (pywebpush 2.x).
+    Returns True on success, False on any failure — never raises.
     """
     if not VAPID_PRIVATE_KEY:
-        log.warning("⚠️  VAPID_PRIVATE_KEY not set — push not sent")
+        log.warning("VAPID_PRIVATE_KEY not set — push not sent")
         return False
     try:
         from pywebpush import WebPushException, webpush
@@ -122,11 +128,33 @@ def _send_push(endpoint: str, p256dh: str, auth_key: str,
             data=payload,
             vapid_private_key=VAPID_PRIVATE_KEY,
             vapid_claims={"sub": f"mailto:{VAPID_CLAIMS_EMAIL}"},
+            content_encoding="aes128gcm",
         )
+        log.info(f"Push sent OK → {endpoint[:50]}…")
         return True
-    except Exception as exc:
-        log.error(f"Push send failed ({endpoint[:40]}...): {exc}")
+    except WebPushException as exc:
+        status_code = exc.response.status_code if exc.response is not None else "no-response"
+        body_text   = (exc.response.text[:300] if exc.response is not None else "") or ""
+        log.error(f"WebPush HTTP {status_code} → {endpoint[:40]}…: {body_text}")
         return False
+    except Exception as exc:
+        log.error(f"Push send error → {endpoint[:40]}…: {exc}")
+        return False
+
+
+# ─────────────────────────────────────────────────────────────
+# 0. VAPID PUBLIC KEY — public, no auth required
+# ─────────────────────────────────────────────────────────────
+
+@router.get("/vapid-public-key")
+async def vapid_public_key():
+    """Return the VAPID public key so the browser can call pushManager.subscribe()."""
+    if not VAPID_PUBLIC_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Push notifications not configured — set VAPID_PUBLIC_KEY on Railway.",
+        )
+    return {"publicKey": VAPID_PUBLIC_KEY}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -389,19 +417,19 @@ async def push_subscribe(
     )
 
     if existing:
-        existing.p256dh     = body.p256dh
-        existing.auth       = body.auth
+        existing.p256dh     = body.keys.p256dh
+        existing.auth       = body.keys.auth
         existing.user_agent = body.user_agent or request.headers.get("User-Agent", "")
         existing.last_used  = datetime.utcnow()
         db.commit()
-        log.info(f"🔔 Push subscription updated: user={current_user.id}")
+        log.info(f"Push subscription updated: user={current_user.id}")
         return {"message": "Push subscription updated.", "subscription_id": existing.id}
 
     sub = PushSubscription(
         user_id    = current_user.id,
         endpoint   = body.endpoint,
-        p256dh     = body.p256dh,
-        auth       = body.auth,
+        p256dh     = body.keys.p256dh,
+        auth       = body.keys.auth,
         user_agent = body.user_agent or request.headers.get("User-Agent", ""),
     )
     db.add(sub)
