@@ -39,7 +39,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from db import get_db
-from main import User
+from main import User, SUPPORTED_CURRENCIES, DEFAULT_CURRENCY
 from notifications import Notification, NotificationStatus
 from routes.auth import get_current_user
 from routes.transactions import Transaction
@@ -80,6 +80,19 @@ class PushUnsubscribeRequest(BaseModel):
 class AnalyticsEventRequest(BaseModel):
     event_type: str                     # sw_install, pwa_install, offline_access, …
     data:       Optional[dict] = None   # arbitrary event payload
+
+
+class SyncItem(BaseModel):
+    type:              str                # "transaction" | "settings"
+    client_id:         Optional[str] = None   # client UUID → stored as reference_id
+    action:            str = "create"         # "create" | "update" | "delete"
+    client_updated_at: Optional[str] = None   # ISO timestamp for conflict detection
+    data:              dict
+
+
+class OfflineSyncRequest(BaseModel):
+    items:     list[SyncItem]
+    last_sync: Optional[str] = None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -512,7 +525,233 @@ async def push_test(
 
 
 # ─────────────────────────────────────────────────────────────
-# 5. ANALYTICS — log and aggregate PWA / SW events
+# 5. OFFLINE BATCH SYNC — client pushes queued items to server
+# ─────────────────────────────────────────────────────────────
+
+def _parse_dt(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(
+            value.strip().replace("Z", "+00:00")
+        ).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _sync_transaction_item(
+    item: SyncItem,
+    user: User,
+    db: Session,
+    affected_months: set,
+) -> dict:
+    from routes.transactions import Transaction, TransactionType, RecurringInterval
+
+    data   = item.data
+    action = item.action.lower()
+
+    if action in ("create", "update"):
+        if not data.get("type") or data.get("amount") is None or not data.get("description"):
+            raise ValueError("transaction requires: type, amount, description")
+
+    existing = None
+    if item.client_id:
+        existing = (
+            db.query(Transaction)
+            .filter(
+                Transaction.user_id      == user.id,
+                Transaction.reference_id == item.client_id,
+            )
+            .first()
+        )
+
+    if action == "delete":
+        if existing and not existing.is_deleted:
+            existing.soft_delete()
+            db.commit()
+            affected_months.add(existing.transaction_date.strftime("%Y-%m"))
+        return {"status": "synced"}
+
+    if action == "create" and existing:
+        return {"status": "skipped"}   # already landed — idempotent
+
+    txn_date = _parse_dt(data.get("transaction_date")) or datetime.utcnow()
+
+    if action == "update" and existing:
+        client_upd = _parse_dt(item.client_updated_at)
+        if client_upd and existing.updated_at and existing.updated_at > client_upd:
+            return {
+                "status": "conflict",
+                "conflict": {
+                    "client_id":      item.client_id,
+                    "type":           "transaction",
+                    "resolution":     "server_wins",
+                    "server_version": existing.to_dict(),
+                },
+            }
+        existing.type               = TransactionType(data["type"])
+        existing.amount             = float(data["amount"])
+        existing.currency           = data.get("currency", user.currency)
+        existing.category           = data.get("category", "Other")
+        existing.description        = data["description"]
+        existing.transaction_date   = txn_date
+        existing.notes              = data.get("notes")
+        existing.is_recurring       = bool(data.get("is_recurring", False))
+        existing.tax_deductible     = bool(data.get("tax_deductible", False))
+        existing.recipient_or_payer = data.get("recipient_or_payer")
+        if data.get("recurring_interval"):
+            existing.recurring_interval = RecurringInterval(data["recurring_interval"])
+        existing.updated_at = datetime.utcnow()
+        db.commit()
+        affected_months.add(txn_date.strftime("%Y-%m"))
+        return {"status": "synced"}
+
+    # Create new transaction
+    from routes.transactions import Transaction as Txn, TransactionType as TT, RecurringInterval as RI
+    txn = Txn(
+        user_id             = user.id,
+        type                = TT(data["type"]),
+        amount              = float(data["amount"]),
+        currency            = data.get("currency", user.currency),
+        category            = data.get("category", "Other"),
+        description         = data["description"],
+        reference_id        = item.client_id,
+        transaction_date    = txn_date,
+        notes               = data.get("notes"),
+        is_recurring        = bool(data.get("is_recurring", False)),
+        tax_deductible      = bool(data.get("tax_deductible", False)),
+        recipient_or_payer  = data.get("recipient_or_payer"),
+        recurring_interval  = RI(data["recurring_interval"])
+                              if data.get("recurring_interval") else None,
+    )
+    db.add(txn)
+    db.commit()
+    db.refresh(txn)
+    affected_months.add(txn_date.strftime("%Y-%m"))
+    return {"status": "synced"}
+
+
+def _sync_settings_item(item: SyncItem, user: User, db: Session) -> dict:
+    data    = item.data
+    changed = False
+    for field in ("name", "timezone", "business_type"):
+        if data.get(field):
+            setattr(user, field, str(data[field]).strip())
+            changed = True
+    if data.get("currency"):
+        c = str(data["currency"]).upper()
+        if c in SUPPORTED_CURRENCIES:
+            user.currency = c
+            changed = True
+    if changed:
+        db.commit()
+    return {"status": "synced"}
+
+
+@router.post("/sync")
+async def offline_push_sync(
+    body:         OfflineSyncRequest,
+    current_user: User    = Depends(get_current_user),
+    db:           Session = Depends(get_db),
+):
+    """
+    Accept a batch of items queued offline and write them to the database.
+
+    Idempotent: duplicate creates with the same client_id are skipped.
+    Server always wins on conflicts (safest for financial data).
+    Monthly summaries are rebuilt for all affected months after the batch.
+
+    Request example:
+        POST /api/v1/pwa/sync
+        Authorization: Bearer <token>
+        {
+          "last_sync": "2026-06-29T08:00:00Z",
+          "items": [
+            {
+              "type": "transaction",
+              "client_id": "offline-uuid-1234",
+              "action": "create",
+              "client_updated_at": "2026-06-29T09:00:00Z",
+              "data": {
+                "type": "income", "amount": 500.00, "currency": "E",
+                "category": "Sales", "description": "Cash sale",
+                "transaction_date": "2026-06-29T09:00:00Z"
+              }
+            },
+            {
+              "type": "settings",
+              "action": "create",
+              "data": { "currency": "E", "timezone": "Africa/Johannesburg" }
+            }
+          ]
+        }
+
+    Response:
+        {
+          "status": "synced",
+          "server_time": "2026-06-30T10:00:00Z",
+          "synced_count": 2,
+          "skipped_count": 0,
+          "conflicts": [],
+          "errors": []
+        }
+    """
+    from routes.transactions import MonthlyTransactionSummary
+
+    server_time     = datetime.utcnow()
+    synced_count    = 0
+    skipped_count   = 0
+    conflicts: list = []
+    errors:    list = []
+    affected_months: set = set()
+
+    for item in body.items:
+        try:
+            if item.type == "transaction":
+                result = _sync_transaction_item(item, current_user, db, affected_months)
+            elif item.type == "settings":
+                result = _sync_settings_item(item, current_user, db)
+            else:
+                errors.append({"client_id": item.client_id, "error": f"unknown type: {item.type!r}"})
+                continue
+
+            if result["status"] == "synced":
+                synced_count += 1
+            elif result["status"] == "skipped":
+                skipped_count += 1
+            elif result["status"] == "conflict":
+                conflicts.append(result["conflict"])
+
+        except Exception as exc:
+            db.rollback()
+            log.error(f"Sync item error client_id={item.client_id}: {exc}")
+            errors.append({"client_id": item.client_id, "error": str(exc)})
+
+    for month in affected_months:
+        try:
+            MonthlyTransactionSummary.rebuild_for_month(
+                db, current_user.id, month, current_user.currency
+            )
+        except Exception as exc:
+            log.error(f"Monthly rebuild failed month={month}: {exc}")
+
+    log.info(
+        f"Offline sync: user={current_user.id} "
+        f"synced={synced_count} skipped={skipped_count} "
+        f"conflicts={len(conflicts)} errors={len(errors)}"
+    )
+    return {
+        "status":        "synced",
+        "server_time":   server_time.isoformat() + "Z",
+        "synced_count":  synced_count,
+        "skipped_count": skipped_count,
+        "conflicts":     conflicts,
+        "errors":        errors,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# 6. ANALYTICS — log and aggregate PWA / SW events
 # ─────────────────────────────────────────────────────────────
 
 VALID_EVENT_TYPES = {

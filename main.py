@@ -110,7 +110,7 @@ if not _jwt_refresh_secret_raw:
 JWT_SECRET           = _jwt_secret_raw
 JWT_REFRESH_SECRET   = _jwt_refresh_secret_raw
 JWT_ALGORITHM        = "HS256"
-ACCESS_TOKEN_MINUTES = int(os.getenv("ACCESS_TOKEN_MINUTES", "30"))
+ACCESS_TOKEN_MINUTES = int(os.getenv("ACCESS_TOKEN_MINUTES", "120"))  # 2 h default — PWA offline queues need breathing room
 REFRESH_TOKEN_DAYS   = int(os.getenv("REFRESH_TOKEN_DAYS",   "7"))
 
 SMTP_HOST     = os.getenv("SMTP_HOST",     "smtp.gmail.com")
